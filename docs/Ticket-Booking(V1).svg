@@ -1,0 +1,80 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="1000" viewBox="0 0 1600 1000">
+  <rect width="1600" height="1000" fill="#101010"/>
+  <style>
+    .entity { fill: #243653; stroke: #8da9d6; stroke-width: 2; rx: 10; }
+    .entity-title { fill: #fff; font: bold 20px sans-serif; text-anchor: middle; }
+    .field { fill: #f4f4f4; font: 16px sans-serif; }
+    .key { text-decoration: underline; }
+    .line { stroke: #ddd; stroke-width: 2; fill: none; }
+    .label { fill: #fff; font: 16px sans-serif; }
+    .note { fill: #332800; stroke: #b88a00; stroke-width: 2; }
+  </style>
+
+  <rect class="note" x="1050" y="30" width="500" height="120"/>
+  <text class="label" x="1070" y="60">Schema update</text>
+  <text class="label" x="1070" y="87">ServiceTier owns tier name and price.</text>
+  <text class="label" x="1070" y="114">InventoryItems references tier_id; no price_override.</text>
+  <text class="label" x="1070" y="141">ServiceTier: UNIQUE(service_id, name).</text>
+
+  <rect class="entity" x="80" y="180" width="210" height="90"/>
+  <text class="entity-title" x="185" y="220">Users</text>
+  <text class="field key" x="105" y="250">id</text>
+
+  <rect class="entity" x="400" y="180" width="230" height="90"/>
+  <text class="entity-title" x="515" y="220">SellerProfiles</text>
+  <text class="field key" x="425" y="250">id</text>
+
+  <rect class="entity" x="760" y="180" width="210" height="90"/>
+  <text class="entity-title" x="865" y="220">Locations</text>
+  <text class="field key" x="785" y="250">id</text>
+
+  <rect class="entity" x="400" y="390" width="230" height="110"/>
+  <text class="entity-title" x="515" y="430">Services</text>
+  <text class="field key" x="425" y="460">id</text>
+  <text class="field" x="425" y="485">booking_mode, base_price</text>
+
+  <rect class="entity" x="760" y="390" width="250" height="110"/>
+  <text class="entity-title" x="885" y="430">ServiceTier</text>
+  <text class="field key" x="785" y="460">id</text>
+  <text class="field" x="785" y="485">service_id, name, price</text>
+
+  <rect class="entity" x="1130" y="390" width="270" height="110"/>
+  <text class="entity-title" x="1265" y="430">InventoryItems</text>
+  <text class="field key" x="1155" y="460">id</text>
+  <text class="field" x="1155" y="485">service_id, tier_id, status</text>
+
+  <rect class="entity" x="180" y="700" width="220" height="110"/>
+  <text class="entity-title" x="290" y="740">Bookings</text>
+  <text class="field key" x="205" y="770">id</text>
+  <text class="field" x="205" y="795">quantity, status, times</text>
+
+  <rect class="entity" x="570" y="700" width="220" height="110"/>
+  <text class="entity-title" x="680" y="740">Payments</text>
+  <text class="field key" x="595" y="770">id</text>
+  <text class="field" x="595" y="795">booking_id, status</text>
+
+  <rect class="entity" x="960" y="700" width="220" height="110"/>
+  <text class="entity-title" x="1070" y="740">Invoices</text>
+  <text class="field key" x="985" y="770">id</text>
+  <text class="field" x="985" y="795">payment_id, invoice_number</text>
+
+  <rect class="entity" x="180" y="900" width="220" height="70"/>
+  <text class="entity-title" x="290" y="943">Cancellations</text>
+  <rect class="entity" x="570" y="900" width="220" height="70"/>
+  <text class="entity-title" x="680" y="943">Reviews</text>
+
+  <path class="line" d="M290 225 H400"/><text class="label" x="315" y="215">1:0..1</text>
+  <path class="line" d="M630 225 H760"/><text class="label" x="665" y="215">1:N</text>
+  <path class="line" d="M515 270 V390"/><text class="label" x="530" y="335">1:N</text>
+  <path class="line" d="M865 270 V390"/><text class="label" x="880" y="335">1:N</text>
+  <path class="line" d="M630 445 H760"/><text class="label" x="660" y="435">1:N</text>
+  <path class="line" d="M1010 445 H1130"/><text class="label" x="1040" y="435">1:N</text>
+  <path class="line" d="M515 500 L350 700"/><text class="label" x="410" y="600">1:N</text>
+  <path class="line" d="M760 445 L400 750"/><text class="label" x="580" y="590">0:N</text>
+  <path class="line" d="M1130 445 L400 750"/><text class="label" x="820" y="590">M:N assigns_unit</text>
+  <path class="line" d="M290 270 V700"/><text class="label" x="305" y="500">1:N</text>
+  <path class="line" d="M400 755 H570"/><text class="label" x="450" y="745">1:1</text>
+  <path class="line" d="M790 755 H960"/><text class="label" x="840" y="745">1:1</text>
+  <path class="line" d="M290 810 V900"/><text class="label" x="305" y="860">0:1</text>
+  <path class="line" d="M350 810 L570 900"/><text class="label" x="430" y="855">0:1</text>
+</svg>
