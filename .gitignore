@@ -12,3 +12,6 @@ wheels/
 # Postman
 postman
 .postman
+
+#enviorment
+.env

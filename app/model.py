@@ -209,6 +209,9 @@ class ItemStatus(str, enum.Enum):
 
 class InventoryItems(Base):
     __tablename__ = "inventory_items"
+    __table_args__ = (
+        UniqueConstraint("service_id", "identifier_code"),
+    )
 
     id: Mapped[int] = mapped_column(primary_key=True)
     service_id: Mapped[int] = mapped_column(
