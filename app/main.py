@@ -1,13 +1,18 @@
 from fastapi import FastAPI
 
-app = FastAPI()
+from .routers import users
 
-@app.get("/")
-def main():
-    return {"message": "Hello from event-booking-ticketing-api!"}
+app = FastAPI(
+    title="Event Booking & Ticketing API",
+    description="Production-ready Event Booking and Ticketing REST API.",
+    version="1.0.0"
+)
+
+# Include API routers
+app.include_router(users.router)
 
 
-if __name__ == "__main__":
-    main()
-
-
+@app.get("/", tags=["Health"])
+def root():
+    """Health check endpoint to verify API availability."""
+    return {"status": "healthy", "message": "Event Booking & Ticketing API is running!"}
