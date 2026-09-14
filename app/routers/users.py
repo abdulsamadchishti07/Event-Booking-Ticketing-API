@@ -1,10 +1,11 @@
+from typing import Annotated
 import random
 from datetime import datetime, timedelta, timezone
 
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, status
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, status, Response
 from sqlalchemy.orm import Session
 
-from .. import email, model, schema, utils
+from .. import email, model, oauth2, schema, utils
 from ..database import get_db
 
 # OTP configuration
@@ -176,3 +177,145 @@ def resend_otp(
     background_tasks.add_task(email.send_otp_email, user.email, otp)
 
     return {"message": "A new verification code has been sent to your email."}
+
+
+# ==========================================================
+# 4. Get Current User Profile (/me)
+# ==========================================================
+@router.get(
+    "/me",
+    response_model=schema.UserOut,
+    summary="Get current logged-in user profile"
+)
+def get_me(
+    current_user: model.User = Depends(oauth2.get_verified_user)
+):
+    """
+    Returns the profile of the currently authenticated user from the JWT token.
+    """
+    return current_user
+
+
+# ==========================================================
+# 5. Dynamic User Profile by ID (/{id})
+# ==========================================================
+@router.get(
+    "/{id}",
+    response_model=schema.UserOut,
+    summary="Get user profile by dynamic ID"
+)
+def get_user_by_id(
+    id: int,
+    db: Session = Depends(get_db),
+    current_user: model.User = Depends(oauth2.get_verified_user)
+):
+    """
+    Dynamically fetches and returns any user's profile by their user ID:
+    e.g. GET /account/1, GET /account/2
+    """
+    target_user = db.query(model.User).filter(model.User.id == id).first()
+    if not target_user:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"User with ID {id} does not exist."
+        )
+
+    return target_user
+
+
+
+# ==========================================================
+# 6. Update User Profile
+# ==========================================================
+@router.put(
+    "/{id}",
+    response_model=schema.UserOut,
+    summary="Update user profile"
+)
+def update_user(
+    id: int,
+    user_update: schema.UserUpdate,
+    current_user: Annotated[model.User, Depends(oauth2.get_verified_user)],
+    db: Session = Depends(get_db)
+):
+    """
+    Updates user details for the authenticated user:
+    - Verifies ownership (users can only update their own profile)
+    - Checks for email uniqueness if updating email
+    - Securely re-hashes password if provided
+    """
+    user_query = db.query(model.User).filter(model.User.id == id)
+    user = user_query.first()
+
+    if not user:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"User with id {id} does not exist."
+        )
+
+    # Authorization: Only allow users to update their own profile
+    if user.id != current_user.id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="You are not allowed to perform this action."
+        )
+
+    # If updating email, ensure it's not already taken by another account
+    if user_update.email and user_update.email != user.email:
+        email_taken = db.query(model.User).filter(model.User.email == user_update.email).first()
+        if email_taken:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=f"Email '{user_update.email}' is already in use by another account."
+            )
+
+    # Extract only the fields explicitly provided in the request body
+    update_data = user_update.model_dump(exclude_unset=True)
+
+    # Hash new password and map to 'password_hash' column if password was provided
+    if "password" in update_data and update_data["password"]:
+        update_data["password_hash"] = utils.hash(update_data.pop("password"))
+
+    if update_data:
+        user_query.update(update_data, synchronize_session=False)
+        db.commit()
+        db.refresh(user)
+
+    return user
+
+
+# ==========================================================
+# 7. Delete User Profile
+# ==========================================================
+@router.delete(
+    "/{id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+    summary="Delete user profile"
+)
+def delete_user(
+    id: int,
+    current_user: Annotated[model.User, Depends(oauth2.get_verified_user)],
+    db: Session = Depends(get_db)
+):
+    """
+    Deletes an account:
+    - Verifies user exists
+    - Ensures user is deleting their own account
+    """
+    user = db.query(model.User).filter(model.User.id == id).first()
+    if not user:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"User with id {id} does not exist."
+        )
+
+    # Authorization: Only allow users to delete their own account
+    if user.id != current_user.id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="You are not allowed to perform this action."
+        )
+
+    db.delete(user)
+    db.commit()
+    return Response(status_code=status.HTTP_204_NO_CONTENT)

@@ -1,6 +1,6 @@
 from fastapi import FastAPI
 
-from .routers import users
+from .routers import users, auth
 
 app = FastAPI(
     title="Event Booking & Ticketing API",
@@ -10,6 +10,7 @@ app = FastAPI(
 
 # Include API routers
 app.include_router(users.router)
+app.include_router(auth.router)
 
 
 @app.get("/", tags=["Health"])
