@@ -1,3 +1,4 @@
+from app import redis_client
 from typing import Annotated
 import random
 from datetime import datetime, timedelta, timezone
@@ -86,10 +87,19 @@ def create_account(
     response_model=schema.MessageResponse,
     summary="Verify account email with OTP"
 )
-def verify_otp(
+async def verify_otp(
     payload: schema.VerifyOTP,
     db: Session = Depends(get_db)
 ):
+
+    # Stop 6-digit PIN brute forcing
+    await redis_client.check_email_and_otp_rate_limiting(
+        email=payload.email,
+        action="verify_otp",
+        max_request=5,
+        window_seconds=300
+    )
+
     """
     Verifies user's email account using the 6-digit OTP:
     - Confirms user exists
@@ -132,6 +142,9 @@ def verify_otp(
     user.verification_otp = None
     user.otp_expires_at = None
     db.commit()
+    
+    # Once verified successfully, clear the counter:
+    await redis_client.redis_client.delete(f"Rate_limit_Email:{payload.email.strip().lower()}:verify_otp")
 
     return {"message": "Email verified successfully! Your account is now active. You can log in."}
 
@@ -144,11 +157,21 @@ def verify_otp(
     response_model=schema.MessageResponse,
     summary="Resend verification OTP"
 )
-def resend_otp(
+async def resend_otp(
     payload: schema.ResendOTP,
     background_tasks: BackgroundTasks,
     db: Session = Depends(get_db)
 ):
+
+    # Prevent email spamming
+    await redis_client.check_email_and_otp_rate_limiting(
+        email=payload.email,
+        action="resend_otp",
+        max_request=1,
+        window_seconds=120
+    )
+
+
     """
     Generates and emails a new OTP code for unverified accounts:
     - Confirms user exists
