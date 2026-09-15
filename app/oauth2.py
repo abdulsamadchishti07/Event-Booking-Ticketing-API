@@ -1,3 +1,4 @@
+import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Annotated
 
@@ -14,6 +15,7 @@ from app.database import get_db
 SECRET_KEY = settings.secret_key
 ALGORITHM = settings.algorithm
 ACCESS_TOKEN_EXPIRE_MINUTES = settings.access_token_expire_minutes
+REFRESH_TOKEN_EXPIRE_DAYS = settings.refresh_token_expire_days
 
 # OAuth2 scheme: specifies the token retrieval endpoint URL
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="login")
@@ -34,6 +36,21 @@ def create_access_token(data: dict, expires_delta: timedelta | None = None) -> s
     to_encode.update({"exp": expire})
     return jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
 
+def create_fresh_token(data:dict) -> tuple[str,str]:
+    """
+    Creates a long-lived JWT refresh token 7 days.
+    Returns both the signed token and its unique session identifier (jti).
+    """
+
+    to_encode = data.copy()
+    jti = str(uuid.uuid4())
+    expire = datetime.now(timezone.utc) + timedelta(days=REFRESH_TOKEN_EXPIRE_DAYS)
+
+    # We add 'jti' so Redis can track it, and 'type': 'refresh' so it cannot be used as an access token
+    to_encode.update({"exp":expire, "jti":jti, "type": "refresh"})
+    token = jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
+
+    return token, jti
 
 async def get_current_user(
     token: Annotated[str, Depends(oauth2_scheme)],

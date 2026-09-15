@@ -12,7 +12,8 @@ class Settings(BaseSettings):
     secret_key: str
     algorithm: str
     access_token_expire_minutes: int
-
+    refresh_token_expire_days: int
+    
     # Email Settings (Gmail SMTP)
     email_host_user: str
     email_host_password: str

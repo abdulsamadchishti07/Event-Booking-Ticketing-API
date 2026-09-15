@@ -1,5 +1,3 @@
-from anyio import current_effective_deadline
-import logging
 from fastapi import HTTPException, status, Request, Depends
 
 import redis.asyncio as aioredis
@@ -10,7 +8,7 @@ from .config import settings
 redis_client = aioredis.from_url(
     settings.redis_url,
     decode_responses=True,
-    max_connections=10000
+    max_connections=30
 )
 
 async def get_redis() -> aioredis.Redis:
