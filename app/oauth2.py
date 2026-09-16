@@ -7,7 +7,7 @@ from fastapi.security import OAuth2PasswordBearer
 from jose import JWTError, jwt
 from sqlalchemy.orm import Session
 
-from app import model
+from app import model, redis_client
 from app.config import settings
 from app.database import get_db
 
@@ -27,6 +27,10 @@ def create_access_token(data: dict, expires_delta: timedelta | None = None) -> s
     Creates a signed JWT access token containing the payload data and expiry.
     """
     to_encode = data.copy()
+
+    # Add a unique ID to access tokens for lightweight blacklisting
+    if "jti" not in to_encode:
+        to_encode["jti"] = str(uuid.uuid4())
 
     if expires_delta:
         expire = datetime.now(timezone.utc) + expires_delta
@@ -52,6 +56,30 @@ def create_fresh_token(data:dict) -> tuple[str,str]:
 
     return token, jti
 
+# BlackList Token
+async def add_blacklist_token(token: str) -> None:
+    """
+    Decodes the access token to get its expiration time ('exp'),
+    calculates how many seconds are left, and stores it in Redis.
+    Redis will automatically delete the key once the token expires.
+    """
+
+    try:
+        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+        exp = payload.get("exp")
+        jti = payload.get("jti")
+        if exp and jti:
+            now = datetime.now(timezone.utc).timestamp()
+            remaining_seconds = int(exp - now)
+            if remaining_seconds > 0:
+                await redis_client.redis_client.setex(
+                    f"blacklist:{jti}",
+                    remaining_seconds,
+                    "revoked"
+                )
+    except JWTError:
+        pass  # If the token is already invalid, no need to blacklist
+
 async def get_current_user(
     token: Annotated[str, Depends(oauth2_scheme)],
     db: Annotated[Session, Depends(get_db)]
@@ -65,13 +93,34 @@ async def get_current_user(
         detail="Could not validate credentials",
         headers={"WWW-Authenticate": "Bearer"}
     )
+
+    # # Check if the token was blacklisted on logout
+    # is_revoked = await redis_client.redis_client.get(f"blacklist:{token}")
+    # if is_revoked:
+    #     raise HTTPException(
+    #         status_code=status.HTTP_401_UNAUTHORIZED,
+    #         detail="Token has been revoked. Please Login again",
+    #         headers={"WWW-Authenticate": "Bearer"}
+    #     )
+
+    # Decode and verify JWT
     try:
         payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
         user_id: str | None = payload.get("sub")
+        jti = payload.get("jti")
         if user_id is None:
             raise credentials_exception
     except JWTError:
         raise credentials_exception
+
+    # Fast lookup by jti:
+    if jti and await redis_client.redis_client.get(f"blacklist:{jti}"):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Token has been revoked. Please Login again",
+            headers={"WWW-Authenticate": "Bearer"}
+        )
+
 
     user = db.query(model.User).filter(model.User.id == int(user_id)).first()
     if user is None:

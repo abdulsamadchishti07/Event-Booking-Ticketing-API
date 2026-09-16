@@ -52,7 +52,7 @@ async def login(
     - Generates and returns a signed JWT access token
     """
     # 2 Find user by email (OAuth2 specification passes email in the 'username' field)
-    user = db.query(model.User).filter(model.User.email == user_credentials.username).first()
+    user = db.query(model.User).filter(model.User.email == email).first()
 
     # Verify password against hash
     if not user or not utils.verify_password(user_credentials.password, user.password_hash):
@@ -73,10 +73,7 @@ async def login(
     # Because they entered the correct password, they are the real user, not an attacker.
     await redis_client.redis_client.delete(f"Rate_limit_Email:{email}:login")
 
-    # Generate JWT access token with subject set to user_id as string
-    access_token = oauth2.create_access_token(
-        data={"user_id": user.id, "sub": str(user.id)}
-    )
+
     # 4. Generate  Access Token
     access_token = oauth2.create_access_token(
         data={"user_id": user.id, "sub" : str(user.id)}
@@ -114,6 +111,7 @@ async def login(
 )
 async def refresh_token(
     request: Request,
+    response: Response,
     db: Session = Depends(get_db)
 ):
     # 1. Extract the refresh token from the HttpOnly cookie
@@ -133,22 +131,46 @@ async def refresh_token(
             raise HTTPException(status_code=401, detail="Invalid refresh token")
     except JWTError:
         raise HTTPException(status_code=401, detail="Refresh token expired or invalid. Please log in again.")
-    # 3. Check Redis: Has this session been logged out or expired?
-    session_key = f"session:{user_id}:{jti}"
-    session_exists = await redis_client.redis_client.get(session_key)
+
+        # 3. Check Redis: Has this session been logged out or expired?
+    old_session_key = f"session:{user_id}:{jti}"
+    session_exists = await redis_client.redis_client.get(old_session_key)
     if not session_exists:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Session has expired due to inactivity. Please log in again."
         )
+
     # 4. User must still exist and be active
     user = db.query(model.User).filter(model.User.id == int(user_id)).first()
     if not user or not user.is_verified:
         raise HTTPException(status_code=401, detail="User account not found or unverified")
-    # Because the user was active, reset the 7-day timer in Redis!
+
+    # 5. ROTATE: Delete old session in Redis
+    await redis_client.redis_client.delete(old_session_key)
+
+    # 6. Issue a BRAND NEW Refresh Token + Session (True sliding window!)
+    new_fresh_token, new_jti = oauth2.create_fresh_token(
+        data={"sub": str(user.id)}
+    )
     session_ttl = oauth2.REFRESH_TOKEN_EXPIRE_DAYS * 24 * 60 * 60
-    await redis_client.redis_client.expire(session_key, session_ttl)
-    # 6. Issue a fresh Access Token
+    await redis_client.redis_client.setex(
+        f"session:{user.id}:{new_jti}",
+        session_ttl,
+        "active"
+    )
+
+    # 7. Update the HTTP Cookies with the rotated refresh token
+    response.set_cookie(
+        key="refresh_token",
+        value=new_fresh_token,
+        httponly=True,
+        secure=False,
+        samesite="lax",
+        max_age=session_ttl
+    )
+
+    # 8. Issue a fresh Access Token
     new_access_token = oauth2.create_access_token(
         data={"user_id": user.id, "sub": str(user.id)}
     )
@@ -161,13 +183,19 @@ async def refresh_token(
 )
 async def logout(
     request: Request,
-    response: Response
+    response: Response,
+    token: Annotated[str, Depends(oauth2.oauth2_scheme)],
+    #  This verifies the user and checks if the token is already blacklisted:
+    current_user: Annotated[model.User, Depends(oauth2.get_current_user)]
 ):
-    # 1. Read refresh token from cookie
-    token = request.cookies.get("refresh_token")
-    if token:
+
+    await oauth2.add_blacklist_token(token)
+
+    # Read refresh token from cookie
+    refresh_token = request.cookies.get("refresh_token")
+    if refresh_token:
         try:
-            payload = jwt.decode(token, oauth2.SECRET_KEY, algorithms=[oauth2.ALGORITHM])
+            payload = jwt.decode(refresh_token, oauth2.SECRET_KEY, algorithms=[oauth2.ALGORITHM])
             user_id = payload.get("sub")
             jti = payload.get("jti")
             if user_id and jti:
@@ -175,8 +203,9 @@ async def logout(
                 await redis_client.redis_client.delete(f"session:{user_id}:{jti}")
         except JWTError:
             pass  # If token is already invalid, just proceed to delete cookie
+    
 
-    # 2. Tell the browser to delete the cookie
+    # Tell the browser to delete the cookie
     response.delete_cookie(key="refresh_token")
 
     return {"message": "Logged out successfully"}
