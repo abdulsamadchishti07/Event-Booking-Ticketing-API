@@ -46,6 +46,12 @@ booking_units = Table(
 # ==========================================================
 # ENTITY: Users
 # ==========================================================
+
+class UserRole(str, enum.Enum):
+    CUSTOMER = "customer"
+    SELLER = "seller"
+    ADMIN = "admin"
+
 class User(Base):
     __tablename__ = "users"
 
@@ -54,7 +60,13 @@ class User(Base):
     email: Mapped[str] = mapped_column(String(255), unique=True, index=True)
     password_hash: Mapped[str] = mapped_column(String(255))
     dob: Mapped[date] = mapped_column(Date)
-    role: Mapped[str] = mapped_column(String(20), server_default="customer")
+    # role: Mapped[str] = mapped_column(String(20), server_default="customer")
+    role: Mapped[UserRole] = mapped_column(
+        Enum(UserRole, name="user_role_enum"),
+        default=UserRole.CUSTOMER,
+        server_default=UserRole.CUSTOMER.value,
+        nullable=False,
+    )
     phone_no: Mapped[Optional[str]] = mapped_column(String(20), unique=True)
 
     is_verified: Mapped[bool] = mapped_column(

@@ -9,6 +9,7 @@ from .model import (
     BookingStatus,
     ItemStatus,
     PaymentStatus,
+    UserRole,
 )
 
 
@@ -39,7 +40,17 @@ class Token(BaseModel):
 class TokenData(BaseModel):
     user_id: Optional[int] = None
     email: Optional[str] = None
-    role: Optional[str] = None
+    role: Optional[UserRole] = None
+
+class ForgotPasswordRequest(BaseModel):
+    email: EmailStr
+
+
+class ResetPasswordRequest(BaseModel):
+    email: EmailStr
+    otp: str = Field(..., min_length=6, max_length=6, description="6-digit reset code")
+    new_password: str = Field(..., min_length=6, max_length=100, description="New password")
+
 
 
 # ==========================================================
@@ -50,7 +61,7 @@ class UserBase(BaseModel):
     email: EmailStr
     dob: date
     phone_no: Optional[str] = Field(None, max_length=20)
-    role: Optional[str] = Field(default="customer", max_length=20)
+    role: Optional[UserRole] = Field(default=UserRole.CUSTOMER)
 
 
 class UserCreate(UserBase):
@@ -62,22 +73,20 @@ class UserUpdate(BaseModel):
     email: Optional[EmailStr] = None
     dob: Optional[date] = None
     phone_no: Optional[str] = Field(None, max_length=20)
-    role: Optional[str] = Field(None, max_length=20)
+    role: Optional[UserRole] = None
     password: Optional[str] = Field(None, min_length=6, max_length=100)
-
 
 class UserOut(BaseModel):
     id: int
     name: str
     email: EmailStr
     dob: date
-    role: str
+    role: UserRole  # <-- Strongly typed enum
     phone_no: Optional[str] = None
     is_verified: bool
     created_at: datetime
 
     model_config = ConfigDict(from_attributes=True)
-
 
 # ==========================================================
 # 2. SellerProfile Schemas

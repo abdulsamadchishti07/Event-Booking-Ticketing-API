@@ -1,3 +1,5 @@
+from pydantic import functional_serializers
+from pydantic import functional_serializers
 from app import redis_client
 from typing import Annotated
 import random
@@ -342,3 +344,97 @@ def delete_user(
     db.delete(user)
     db.commit()
     return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+# ==========================================================
+# 8. Reset Password 
+# ==========================================================
+@router.post(
+    "/forgot-password",
+    response_model=schema.MessageResponse,
+    summary="Request password reset OTP"
+)
+async def forgot_password(
+    payload: schema.ForgotPasswordRequest,
+    background_tasks: BackgroundTasks,
+    db: Session= Depends(get_db)
+):
+    clean_email = payload.email.strip().lower()
+
+    # Rate-limit reset requests (1 request per 2 minutes) to prevent email spam
+    await redis_client.check_email_and_otp_rate_limiting(
+        email=clean_email,
+        action="forgot_password",
+        max_request=1,
+        window_seconds=120
+    )
+ 
+    # Check if user exists
+    user = db.query(model.User).filter(model.User.email == clean_email).first()
+    if not user:
+        # Generic response to prevent email enumeration/discovery attacks
+        return {"message": "OTP has been send to your email."}
+    
+    # Generate 6-digit OTP and store in Redis with 5-minute expiry (300 seconds)
+    otp = f"{random.randint(100000, 999999)}"
+    await redis_client.redis_client.setex(f"reset_pwd_otp:{clean_email}", 300, otp)
+
+    # Send reset code email in the background
+    background_tasks.add_task(email.send_password_reset_email, clean_email, otp)
+    return {"message": "If this email is registered, a password reset code has been sent."}
+
+
+# ==========================================================
+# 9. Reset Password (Verify OTP and Set New Password)
+# ==========================================================
+@router.post(
+    "/reset-password",
+    response_model=schema.MessageResponse,
+    summary="Reset password with OTP"
+)
+async def reset_password(
+    payload: schema.ResetPasswordRequest,
+    db: Session = Depends(get_db)
+):
+    clean_email = payload.email.strip().lower()
+
+    # Rate-limit attempts to prevent brute-forcing the 6-digit PIN
+    await redis_client.check_email_and_otp_rate_limiting(
+        email=clean_email,
+        action="reset_password_attempts",
+        max_request=5,
+        window_seconds=300
+    )
+
+
+    # 1. Verify OTP from Redis
+    stored_otp = await redis_client.redis_client.get(f"reset_pwd_otp:{clean_email}")
+    if not stored_otp:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Password reset code has expired or is invalid. Please request a new one."
+        )
+    if stored_otp != payload.otp:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid verification code."
+        )
+
+    # 2. Find user in database
+    user = db.query(model.User).filter(model.User.email == clean_email).first()
+    if not user:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="User not found."
+        )
+
+    # 3. Hash the new password with Argon2id and save
+    user.password_hash = utils.hash(payload.new_password)
+    db.commit()
+
+
+    # 4. Clean up Redis OTP and unlock account if it was locked out
+    await redis_client.redis_client.delete(f"reset_pwd_otp:{clean_email}")
+    await redis_client.redis_client.delete(f"account_locked:{clean_email}")
+    await redis_client.redis_client.delete(f"failed_logins:{clean_email}")
+
+    return {"message": "Password reset successfully. You can now log in with your new password."}

@@ -34,6 +34,14 @@ async def login(
 
     email = user_credentials.username.strip().lower()
 
+    # check if account is temp lock
+    lock_key = f"account_locked:{email}"
+    if await redis_client.redis_client.get(lock_key):
+        ttl = await redis_client.redis_client.ttl(lock_key)
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=f"Account is temporarily locked due to multiple failed login attempts. Please try again in {ttl} seconds."
+        )
 
     # 1. Enforce Email Rate Limit (Max 5 attempts in 20 mins = 1200s)
     await redis_client.check_email_and_otp_rate_limiting(
@@ -54,15 +62,30 @@ async def login(
     # 2 Find user by email (OAuth2 specification passes email in the 'username' field)
     user = db.query(model.User).filter(model.User.email == email).first()
 
-    # Verify password against hash
+    # Verify password against hash & track failed attempts
+        # Verify password against hash & track failed attempts
     if not user or not utils.verify_password(user_credentials.password, user.password_hash):
+        failed_key = f"failed_logins:{email}"
+        failed_attempts = await redis_client.redis_client.incr(failed_key)
+        if failed_attempts == 1:
+            await redis_client.redis_client.expire(failed_key, 900)
+        # 5 consecutive failures = 15-minute lock
+        if failed_attempts >= 5:
+            await redis_client.redis_client.setex(lock_key, 900, "locked")
+            await redis_client.redis_client.delete(failed_key)
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Account has been locked for 15 minutes due to 5 consecutive failed login attempts."
+            )
+        remaining = 5 - failed_attempts
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid Credentials",
+            detail=f"Invalid Credentials. {remaining} attempt(s) remaining before account lockout.",
             headers={"WWW-Authenticate": "Bearer"},
         )
 
-    # Ensure account is verified before granting JWT
+
+            # Ensure account is verified before granting JWT
     if not user.is_verified:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
@@ -71,6 +94,7 @@ async def login(
 
     # 3. SUCCESSFUL LOGIN: Reset the email counter!
     # Because they entered the correct password, they are the real user, not an attacker.
+    await redis_client.redis_client.delete(f"failed_logins:{email}")
     await redis_client.redis_client.delete(f"Rate_limit_Email:{email}:login")
 
 

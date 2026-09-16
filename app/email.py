@@ -67,3 +67,22 @@ def send_otp_email(to_email: str, otp: str) -> None:
     html_content = template.render(otp=otp)
 
     send_mail(to_email=to_email, subject=subject, html_content=html_content)
+
+
+
+def send_password_reset_email(to_email: str, otp: str) -> None:
+    """
+    Sends an HTML email with the 6-digit password reset OTP.
+    """
+    subject = "Password Reset Code - Event Booking"
+    html_content = f"""
+    <div style="font-family: Arial, sans-serif; max-width: 500px; margin: auto; padding: 24px; border: 1px solid #e2e8f0; border-radius: 12px; background: #ffffff;">
+        <h2 style="color: #4f46e5; margin-top: 0;">🎟️ Password Reset Request</h2>
+        <p style="color: #334155; line-height: 1.5;">You requested to reset your password. Use the verification code below to set a new password:</p>
+        <div style="font-size: 32px; font-weight: 800; letter-spacing: 8px; color: #4f46e5; text-align: center; padding: 18px; margin: 20px 0; background: #f1f5f9; border: 2px dashed #818cf8; border-radius: 8px;">
+            {otp}
+        </div>
+        <p style="color: #64748b; font-size: 13px;">This code will expire in <strong>5 minutes</strong>. If you did not request this, please ignore this email.</p>
+    </div>
+    """
+    send_mail(to_email=to_email, subject=subject, html_content=html_content)
