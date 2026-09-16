@@ -25,7 +25,7 @@
 | Sprint | Title                                           |          Status          | Primary Focus                                                     |
 | :----: | :---------------------------------------------- | :----------------------: | :---------------------------------------------------------------- |
 | **1**  | **Foundations & Relational DB Schema**          |     ✅ **COMPLETED**     | PostgreSQL Schema, ER Diagrams, Alembic Migrations                |
-| **2**  | **Auth, Session Management & Security**         | 🟡 **IN PROGRESS (90%)** | JWT, Argon2id, Redis Sessions, Rate Limiting, RBAC                |
+| **2**  | **Auth, Session Management & Security**         | 🟡 **IN PROGRESS (95%)** | JWT, Argon2id, Redis Sessions, Rate Limiting, RBAC                |
 | **3**  | **Event Management & Concurrency-Safe Booking** |      ⏳ **UP NEXT**      | Event/Seat CRUD, `SELECT FOR UPDATE`, Race condition prevention   |
 | **4**  | **Stripe Payments & Async Webhooks**            |      ⏳ **PENDING**      | PaymentIntents, Webhook signature verification, Invoices, Refunds |
 | **5**  | **Redis Caching & Performance Tuning**          |      ⏳ **PENDING**      | Listing cache, cache invalidation on write, endpoint optimization |
@@ -63,7 +63,7 @@
 
 ### Sprint 2: Authentication, Sessions & Security
 
-**Status**: 🟡 **IN PROGRESS (Finishing Up)**
+**Status**: 🟡 **IN PROGRESS (95% Completed)**
 
 #### What is implemented:
 
@@ -73,16 +73,26 @@
   - Background email delivery via FastAPI `BackgroundTasks`.
   - OTP Verification (`POST /account/verify-otp`) with 5-minute expiry check.
   - Resend OTP (`POST /account/resend-otp`).
-- **OAuth2 Login & Session Management (`app/routers/auth.py`)**:
-  - `POST /login`: OAuth2 password form, verifies Argon2id hash & account active status.
-  - **Short-lived Access Token**: JWT with 10–15 min expiry returned to client.
+  - **Password Reset Flow**:
+    - `POST /account/forgot-password`: Generates 6-digit OTP stored in Redis (5-min TTL) and dispatched via Gmail SMTP. Generic response prevents email enumeration.
+    - `POST /account/reset-password`: Verifies OTP, hashes new password with Argon2id, and clears existing lockouts and OTP keys.
+- **OAuth2 Login, Session Management & Token Rotation (`app/routers/auth.py`)**:
+  - `POST /login`: OAuth2 password form, verifies Argon2id hash & account active status with normalized lowercase email.
+  - **Short-lived Access Token**: Signed JWT with unique `jti` (UUID) and 10–15 min expiry returned to client.
   - **Long-lived Refresh Token**: Signed JWT with unique `jti` (UUID) placed in a secure **HttpOnly Cookie**.
   - **Redis Sliding Session**: Active session saved as `session:{user_id}:{jti}` with a 7-day sliding TTL.
-  - `POST /refresh`: Verifies cookie token against Redis, resets 7-day TTL, issues fresh access token.
-  - `POST /logout`: Immediately invalidates the session key in Redis and clears cookies.
-- **Redis Rate Limiting (`app/redis_client.py`)**:
+  - **True Refresh Token Rotation (`POST /refresh`)**: Invalidates old Redis session, issues a brand-new Refresh Token + JTI with refreshed 7-day TTL, updates the HttpOnly cookie, and issues a new access token.
+  - **Instant Revocation on Logout (`POST /logout`)**:
+    - Requires active authentication (prevents repeated/unauthorized logouts).
+    - Blacklists the Access Token by `jti` in Redis with remaining lifespan TTL (immediately rejecting requests to `/account/me`).
+    - Deletes the Refresh Token session in Redis and clears the HttpOnly cookie.
+- **Security & Protection (`app/redis_client.py`)**:
   - IP-based rate limiting dependency (`Rate_Limit:{ip}:{path}`).
   - Email action rate limiting (`Rate_limit_Email:{email}:{action}`) preventing OTP & login brute force.
+  - **Account Lockout**: Automatically locks account for 15 minutes after 5 consecutive failed login attempts via Redis (`account_locked:{email}`).
+- **Schema & Database Hardening**:
+  - `User.role` converted from raw string to PostgreSQL native enum (`user_role_enum`) with strict typed `UserRole` Enum (`CUSTOMER`, `SELLER`, `ADMIN`).
+  - Applied missing database unique constraint on `inventory_items(service_id, identifier_code)` via Alembic migration (`269044107d58`).
 - **User Profile Endpoints**:
   - `GET /account/me`, `GET /account/{id}`, `PUT /account/{id}`, `DELETE /account/{id}`.
 
@@ -96,7 +106,7 @@
 #### Learning Goal:
 
 > You must be able to explain the entire Auth lifecycle without notes:
-> `Login Request -> Argon2 Verify -> Access Token (in memory) + Refresh Token (HttpOnly Cookie) -> Redis Session TTL -> Auto Renewal on /refresh -> Logout Blacklist/Deletion`.
+> `Login Request -> Argon2 Verify -> Access Token (with JTI) + Refresh Token (HttpOnly Cookie) -> Redis Session TTL -> True Rotation on /refresh -> Logout JTI Blacklist & Session Deletion -> Account Lockout on 5 failures`.
 
 ---
 
