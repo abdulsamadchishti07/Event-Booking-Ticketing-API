@@ -96,3 +96,18 @@ async def check_email_and_otp_rate_limiting(
             detail=f"Too many requests from {clean_email}. Retry after {ttl} seconds.",
             headers={"Retry-After": str(ttl)}
         )
+
+
+async def revoke_all_user_sessions(
+    user_id: int,
+    redis: aioredis.Redis = redis_client
+) -> int:
+    """
+    Scans and deletes all active session keys (refresh tokens) for a given user.
+    Forces all devices to re-login.
+    """
+    session_keys = [k async for k in redis.scan_iter(f"session:{user_id}:*")]
+    if session_keys:
+        await redis.delete(*session_keys)
+    return len(session_keys)
+

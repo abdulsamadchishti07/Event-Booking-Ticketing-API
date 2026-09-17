@@ -63,7 +63,6 @@ async def login(
     user = db.query(model.User).filter(model.User.email == email).first()
 
     # Verify password against hash & track failed attempts
-        # Verify password against hash & track failed attempts
     if not user or not utils.verify_password(user_credentials.password, user.password_hash):
         failed_key = f"failed_logins:{email}"
         failed_attempts = await redis_client.redis_client.incr(failed_key)
@@ -84,8 +83,7 @@ async def login(
             headers={"WWW-Authenticate": "Bearer"},
         )
 
-
-            # Ensure account is verified before granting JWT
+    # Ensure account is verified before granting JWT
     if not user.is_verified:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,

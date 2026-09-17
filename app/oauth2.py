@@ -94,15 +94,6 @@ async def get_current_user(
         headers={"WWW-Authenticate": "Bearer"}
     )
 
-    # # Check if the token was blacklisted on logout
-    # is_revoked = await redis_client.redis_client.get(f"blacklist:{token}")
-    # if is_revoked:
-    #     raise HTTPException(
-    #         status_code=status.HTTP_401_UNAUTHORIZED,
-    #         detail="Token has been revoked. Please Login again",
-    #         headers={"WWW-Authenticate": "Bearer"}
-    #     )
-
     # Decode and verify JWT
     try:
         payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
@@ -166,3 +157,38 @@ async def get_optional_current_user(
         return user if (user and user.is_verified) else None
     except JWTError:
         return None
+
+
+# ==========================================================
+# Role-Based Access Control (RBAC) Guards
+# ==========================================================
+class RequireRole:
+    """
+    FastAPI dependency guard that ensures the current user has one of the allowed roles.
+    Usage: current_user = Depends(RequireRole([model.UserRole.SELLER, model.UserRole.ADMIN]))
+    """
+    def __init__(self, allowed_roles: list[model.UserRole] | list[str]):
+        self.allowed_roles = [
+            r.value if isinstance(r, model.UserRole) else r for r in allowed_roles
+        ]
+
+    def __call__(
+        self,
+        current_user: Annotated[model.User, Depends(get_verified_user)]
+    ) -> model.User:
+        user_role = (
+            current_user.role.value
+            if isinstance(current_user.role, model.UserRole)
+            else current_user.role
+        )
+        if user_role not in self.allowed_roles:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=f"Access forbidden: requires one of the following roles: {', '.join(self.allowed_roles)}"
+            )
+        return current_user
+
+
+# Convenience shortcuts for routes
+require_seller = RequireRole([model.UserRole.SELLER, model.UserRole.ADMIN])
+require_admin = RequireRole([model.UserRole.ADMIN])

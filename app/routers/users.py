@@ -1,9 +1,8 @@
-from pydantic import functional_serializers
-from pydantic import functional_serializers
-from app import redis_client
-from typing import Annotated
 import random
 from datetime import datetime, timedelta, timezone
+from typing import Annotated
+
+from app import redis_client
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, status, Response
 from sqlalchemy.orm import Session
@@ -372,7 +371,7 @@ async def forgot_password(
     user = db.query(model.User).filter(model.User.email == clean_email).first()
     if not user:
         # Generic response to prevent email enumeration/discovery attacks
-        return {"message": "OTP has been send to your email."}
+        return {"message": "If this email is registered, a password reset code has been sent."}
     
     # Generate 6-digit OTP and store in Redis with 5-minute expiry (300 seconds)
     otp = f"{random.randint(100000, 999999)}"
@@ -431,10 +430,61 @@ async def reset_password(
     user.password_hash = utils.hash(payload.new_password)
     db.commit()
 
+    # 4. Invalidate all active sessions for this user across all devices
+    await redis_client.revoke_all_user_sessions(user.id)
 
-    # 4. Clean up Redis OTP and unlock account if it was locked out
+    # 5. Clean up Redis OTP and unlock account if it was locked out
     await redis_client.redis_client.delete(f"reset_pwd_otp:{clean_email}")
     await redis_client.redis_client.delete(f"account_locked:{clean_email}")
     await redis_client.redis_client.delete(f"failed_logins:{clean_email}")
 
     return {"message": "Password reset successfully. You can now log in with your new password."}
+
+
+# ==========================================================
+# 10. Seller Onboarding (Become a Seller)
+# ==========================================================
+@router.post(
+    "/become-seller",
+    response_model=schema.SellerProfileOut,
+    status_code=status.HTTP_201_CREATED,
+    summary="Register as an Event Organizer / Seller"
+)
+def become_seller(
+    payload: schema.SellerProfileCreate,
+    current_user: model.User = Depends(oauth2.get_verified_user),
+    db: Session = Depends(get_db)
+):
+    """
+    Allows a verified user to create a Seller profile:
+    - Ensures user does not already have a seller profile
+    - Creates a 1:1 SellerProfile record
+    - Upgrades the user's role to 'seller'
+    """
+    # 1. Check if user already registered as a seller
+    existing_profile = db.query(model.SellerProfile).filter(
+        model.SellerProfile.user_id == current_user.id
+    ).first()
+    if existing_profile:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="You are already registered as a seller."
+        )
+
+    # 2. Create the SellerProfile
+    seller_profile = model.SellerProfile(
+        user_id=current_user.id,
+        business_name=payload.business_name,
+        business_desc=payload.business_desc,
+        is_verified=False
+    )
+    db.add(seller_profile)
+
+    # 3. Upgrade user role to SELLER (unless they are already an ADMIN)
+    if current_user.role != model.UserRole.ADMIN:
+        current_user.role = model.UserRole.SELLER
+
+    db.commit()
+    db.refresh(seller_profile)
+
+    return seller_profile
