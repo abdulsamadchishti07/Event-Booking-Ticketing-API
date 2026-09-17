@@ -25,7 +25,7 @@
 | Sprint | Title                                           |          Status          | Primary Focus                                                     |
 | :----: | :---------------------------------------------- | :----------------------: | :---------------------------------------------------------------- |
 | **1**  | **Foundations & Relational DB Schema**          |     ✅ **COMPLETED**     | PostgreSQL Schema, ER Diagrams, Alembic Migrations                |
-| **2**  | **Auth, Session Management & Security**         | 🟡 **IN PROGRESS (95%)** | JWT, Argon2id, Redis Sessions, Rate Limiting, RBAC                |
+| **2**  | **Auth, Session Management & Security**         | 🟡 **TESTING IN PROGRESS** | JWT, Argon2id, Redis Sessions, Rate Limiting, RBAC & Pytest Suite |
 | **3**  | **Event Management & Concurrency-Safe Booking** |      ⏳ **UP NEXT**      | Event/Seat CRUD, `SELECT FOR UPDATE`, Race condition prevention   |
 | **4**  | **Stripe Payments & Async Webhooks**            |      ⏳ **PENDING**      | PaymentIntents, Webhook signature verification, Invoices, Refunds |
 | **5**  | **Redis Caching & Performance Tuning**          |      ⏳ **PENDING**      | Listing cache, cache invalidation on write, endpoint optimization |
@@ -63,7 +63,7 @@
 
 ### Sprint 2: Authentication, Sessions & Security
 
-**Status**: 🟡 **IN PROGRESS (95% Completed)**
+**Status**: 🟡 **IN PROGRESS (Core Features 100% Completed — Building Test Suite)**
 
 #### What is implemented:
 
@@ -74,8 +74,8 @@
   - OTP Verification (`POST /account/verify-otp`) with 5-minute expiry check.
   - Resend OTP (`POST /account/resend-otp`).
   - **Password Reset Flow**:
-    - `POST /account/forgot-password`: Generates 6-digit OTP stored in Redis (5-min TTL) and dispatched via Gmail SMTP. Generic response prevents email enumeration.
-    - `POST /account/reset-password`: Verifies OTP, hashes new password with Argon2id, and clears existing lockouts and OTP keys.
+    - `POST /account/forgot-password`: Generates 6-digit OTP stored in Redis (5-min TTL) and dispatched via Gmail SMTP. Identical generic response on both user-found and user-not-found paths blocks email enumeration attacks.
+    - `POST /account/reset-password`: Verifies OTP, hashes new password with Argon2id, clears lockouts/failed attempts, and **invalidates all active user sessions across all devices** via `revoke_all_user_sessions` (scanning `session:{user_id}:*` in Redis).
 - **OAuth2 Login, Session Management & Token Rotation (`app/routers/auth.py`)**:
   - `POST /login`: OAuth2 password form, verifies Argon2id hash & account active status with normalized lowercase email.
   - **Short-lived Access Token**: Signed JWT with unique `jti` (UUID) and 10–15 min expiry returned to client.
@@ -90,18 +90,55 @@
   - IP-based rate limiting dependency (`Rate_Limit:{ip}:{path}`).
   - Email action rate limiting (`Rate_limit_Email:{email}:{action}`) preventing OTP & login brute force.
   - **Account Lockout**: Automatically locks account for 15 minutes after 5 consecutive failed login attempts via Redis (`account_locked:{email}`).
+  - **Pattern-Based Session Revocation**: `revoke_all_user_sessions(user_id)` helper function using `scan_iter`.
+- **Role-Based Access Control (RBAC) (`app/oauth2.py`)**:
+  - `RequireRole` dependency guard supporting single/multiple roles (e.g. `[UserRole.SELLER, UserRole.ADMIN]`).
+  - Reusable shortcuts: `require_seller`, `require_admin`.
+- **Seller Onboarding (`POST /account/become-seller`) (`app/routers/users.py`)**:
+  - Validates verified account status, enforces 1:1 `SellerProfile` constraint.
+  - Automatically elevates user role to `UserRole.SELLER` (preserving `ADMIN` if already admin).
 - **Schema & Database Hardening**:
   - `User.role` converted from raw string to PostgreSQL native enum (`user_role_enum`) with strict typed `UserRole` Enum (`CUSTOMER`, `SELLER`, `ADMIN`).
   - Applied missing database unique constraint on `inventory_items(service_id, identifier_code)` via Alembic migration (`269044107d58`).
 - **User Profile Endpoints**:
   - `GET /account/me`, `GET /account/{id}`, `PUT /account/{id}`, `DELETE /account/{id}`.
 
-#### Remaining in Sprint 2 to Complete:
+#### Completed Milestones in Sprint 2:
 
-- [ ] **Role-Based Access Control (RBAC)**:
-  - Add explicit FastAPI dependency guards: `require_role(["seller", "admin"])`.
-- [ ] **Seller Onboarding Endpoint**:
-  - Endpoint for verified users to create/update their `SellerProfile` (`POST /account/become-seller`).
+- [x] **Core Auth & User Lifecycle** (Registration, OTP verification, login, profile CRUD).
+- [x] **Redis Session Management & Token Rotation** (HttpOnly refresh cookie, 7-day sliding window).
+- [x] **Rate Limiting & Account Lockout** (IP & Email rate limiting, 5-attempt lockout).
+- [x] **Password Reset & Security Hardening** (Anti-enumeration, all-session revocation on reset).
+- [x] **Role-Based Access Control (RBAC)** (`RequireRole`, `require_seller`, `require_admin`).
+- [x] **Seller Onboarding Endpoint** (`POST /account/become-seller`).
+
+#### Automated Test Suite Plan (Pytest):
+
+- [ ] **Test Configuration & Fixtures (`tests/conftest.py`)**:
+  - Test database engine & session fixtures (clean transaction isolation per test).
+  - Test Redis fixture (clean keyspace isolation / mock or dedicated test db index).
+  - Async HTTP test client (`httpx.AsyncClient`) configured with FastAPI `app`.
+  - Helper fixtures for creating verified customer, seller, and admin users with tokens.
+- [ ] **User & Profile Tests (`tests/test_users.py`)**:
+  - `POST /account/register` (success, duplicate email conflict, invalid payload).
+  - `POST /account/verify-otp` (correct OTP, expired OTP, invalid OTP, rate limit).
+  - `POST /account/resend-otp` (rate limit enforcement, verified user rejection).
+  - `GET /account/me` (authenticated vs unauthenticated vs unverified).
+  - `PUT /account/{id}` & `DELETE /account/{id}` (ownership validation).
+- [ ] **Authentication & Session Tests (`tests/test_auth.py`)**:
+  - `POST /login` (valid credentials, wrong password, lockout after 5 consecutive failures).
+  - `POST /refresh` (successful token rotation, missing cookie, expired session, old token reuse rejection).
+  - `POST /logout` (access token blacklist verification, session deletion, cookie cleared).
+- [ ] **Password Reset Tests (`tests/test_password_reset.py`)**:
+  - `POST /account/forgot-password` (identical response for existent vs non-existent email).
+  - `POST /account/reset-password` (successful reset with valid OTP, wrong OTP, expired OTP).
+  - Verification that previous sessions (`session:{user_id}:*`) are deleted in Redis upon reset.
+- [ ] **RBAC & Seller Onboarding Tests (`tests/test_rbac_seller.py`)**:
+  - `POST /account/become-seller` (customer becomes seller, duplicate profile rejection, admin preservation).
+  - Role guard verification (`require_seller` and `require_admin` denying customer with 403 Forbidden).
+- [ ] **Rate Limiting Tests (`tests/test_rate_limiting.py`)**:
+  - IP rate limiter (`429 Too Many Requests`).
+  - Email action rate limiter for OTP verification, resend, and login.
 
 #### Learning Goal:
 
@@ -225,9 +262,11 @@ Demonstrating that the system works reliably in production and proving with real
 
 ## 🎯 Current Immediate Action Items
 
-1. **Wrap up Sprint 2**:
-   - Implement role check dependencies (`require_seller`, `require_admin`).
-   - Add the seller profile setup endpoint (`/account/become-seller`).
+1. **Sprint 2 Automated Test Suite (`pytest`)**:
+   - Create `tests/conftest.py` with test database, Redis client, and test authentication fixtures.
+   - Implement test modules: `test_users.py`, `test_auth.py`, `test_password_reset.py`, and `test_rbac_seller.py`.
+   - Run `pytest` via `.venv/bin/pytest` and verify 100% green test execution.
 2. **Transition to Sprint 3**:
    - Create router `app/routers/services.py` for Event/Service CRUD.
    - Implement the `SELECT FOR UPDATE` locking mechanism for `POST /bookings`.
+
