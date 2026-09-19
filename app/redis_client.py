@@ -74,11 +74,14 @@ class IPRateLimiting():
 
 async def check_email_and_otp_rate_limiting(
     email: str,
-    action:str,
+    action: str,
     max_request: int,
     window_seconds: int,
-    redis: aioredis.Redis = redis_client
+    redis: aioredis.Redis | None = None
 ): 
+    if redis is None:
+        redis = redis_client
+
     clean_email = email.strip().lower()
     redis_key = f"Rate_limit_Email:{clean_email}:{action}"
 
@@ -100,12 +103,15 @@ async def check_email_and_otp_rate_limiting(
 
 async def revoke_all_user_sessions(
     user_id: int,
-    redis: aioredis.Redis = redis_client
+    redis: aioredis.Redis | None = None
 ) -> int:
     """
     Scans and deletes all active session keys (refresh tokens) for a given user.
     Forces all devices to re-login.
     """
+    if redis is None:
+        redis = redis_client
+
     session_keys = [k async for k in redis.scan_iter(f"session:{user_id}:*")]
     if session_keys:
         await redis.delete(*session_keys)

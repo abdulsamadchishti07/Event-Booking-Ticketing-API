@@ -22,14 +22,14 @@
 
 ## 📊 Sprint Tracker
 
-| Sprint | Title                                           |          Status          | Primary Focus                                                     |
-| :----: | :---------------------------------------------- | :----------------------: | :---------------------------------------------------------------- |
-| **1**  | **Foundations & Relational DB Schema**          |     ✅ **COMPLETED**     | PostgreSQL Schema, ER Diagrams, Alembic Migrations                |
+| Sprint | Title                                           |           Status           | Primary Focus                                                     |
+| :----: | :---------------------------------------------- | :------------------------: | :---------------------------------------------------------------- |
+| **1**  | **Foundations & Relational DB Schema**          |      ✅ **COMPLETED**      | PostgreSQL Schema, ER Diagrams, Alembic Migrations                |
 | **2**  | **Auth, Session Management & Security**         | 🟡 **TESTING IN PROGRESS** | JWT, Argon2id, Redis Sessions, Rate Limiting, RBAC & Pytest Suite |
-| **3**  | **Event Management & Concurrency-Safe Booking** |      ⏳ **UP NEXT**      | Event/Seat CRUD, `SELECT FOR UPDATE`, Race condition prevention   |
-| **4**  | **Stripe Payments & Async Webhooks**            |      ⏳ **PENDING**      | PaymentIntents, Webhook signature verification, Invoices, Refunds |
-| **5**  | **Redis Caching & Performance Tuning**          |      ⏳ **PENDING**      | Listing cache, cache invalidation on write, endpoint optimization |
-| **6**  | **Docker, Nginx & Stress Load Testing**         |      ⏳ **PENDING**      | Docker Compose, Nginx reverse proxy, Locust/k6 concurrency tests  |
+| **3**  | **Event Management & Concurrency-Safe Booking** |       ⏳ **UP NEXT**       | Event/Seat CRUD, `SELECT FOR UPDATE`, Race condition prevention   |
+| **4**  | **Stripe Payments & Async Webhooks**            |       ⏳ **PENDING**       | PaymentIntents, Webhook signature verification, Invoices, Refunds |
+| **5**  | **Redis Caching & Performance Tuning**          |       ⏳ **PENDING**       | Listing cache, cache invalidation on write, endpoint optimization |
+| **6**  | **Docker, Nginx & Stress Load Testing**         |       ⏳ **PENDING**       | Docker Compose, Nginx reverse proxy, Locust/k6 concurrency tests  |
 
 ---
 
@@ -269,4 +269,3 @@ Demonstrating that the system works reliably in production and proving with real
 2. **Transition to Sprint 3**:
    - Create router `app/routers/services.py` for Event/Service CRUD.
    - Implement the `SELECT FOR UPDATE` locking mechanism for `POST /bookings`.
-
