@@ -114,29 +114,29 @@
 
 #### Automated Test Suite Plan (Pytest):
 
-- [ ] **Test Configuration & Fixtures (`tests/conftest.py`)**:
+- [x] **Test Configuration & Fixtures (`tests/conftest.py`)**:
   - Test database engine & session fixtures (clean transaction isolation per test).
   - Test Redis fixture (clean keyspace isolation / mock or dedicated test db index).
   - Async HTTP test client (`httpx.AsyncClient`) configured with FastAPI `app`.
   - Helper fixtures for creating verified customer, seller, and admin users with tokens.
-- [ ] **User & Profile Tests (`tests/test_users.py`)**:
+- [x] **User & Profile Tests (`tests/test_users.py`)**:
   - `POST /account/register` (success, duplicate email conflict, invalid payload).
   - `POST /account/verify-otp` (correct OTP, expired OTP, invalid OTP, rate limit).
   - `POST /account/resend-otp` (rate limit enforcement, verified user rejection).
   - `GET /account/me` (authenticated vs unauthenticated vs unverified).
   - `PUT /account/{id}` & `DELETE /account/{id}` (ownership validation).
-- [ ] **Authentication & Session Tests (`tests/test_auth.py`)**:
+- [x] **Authentication & Session Tests (`tests/test_auth.py`)**:
   - `POST /login` (valid credentials, wrong password, lockout after 5 consecutive failures).
   - `POST /refresh` (successful token rotation, missing cookie, expired session, old token reuse rejection).
   - `POST /logout` (access token blacklist verification, session deletion, cookie cleared).
-- [ ] **Password Reset Tests (`tests/test_password_reset.py`)**:
+- [x] **Password Reset Tests (`tests/test_password_reset.py`)**:
   - `POST /account/forgot-password` (identical response for existent vs non-existent email).
   - `POST /account/reset-password` (successful reset with valid OTP, wrong OTP, expired OTP).
   - Verification that previous sessions (`session:{user_id}:*`) are deleted in Redis upon reset.
-- [ ] **RBAC & Seller Onboarding Tests (`tests/test_rbac_seller.py`)**:
+- [x] **RBAC & Seller Onboarding Tests (`tests/test_rbac_seller.py`)**:
   - `POST /account/become-seller` (customer becomes seller, duplicate profile rejection, admin preservation).
   - Role guard verification (`require_seller` and `require_admin` denying customer with 403 Forbidden).
-- [ ] **Rate Limiting Tests (`tests/test_rate_limiting.py`)**:
+- [x] **Rate Limiting Tests (`tests/test_rate_limiting.py`)**:
   - IP rate limiter (`429 Too Many Requests`).
   - Email action rate limiter for OTP verification, resend, and login.
 
@@ -149,40 +149,197 @@
 
 ### Sprint 3: Core Booking Logic & Concurrency Control
 
-**Status**: ⏳ **UP NEXT (The Technical Core)**
+**Status**: ⏳ **IN PROGRESS (The Technical Core)**
 
-#### The Challenge:
+#### 🎯 The Core Engineering Challenge:
 
-What happens when **100 users try to book the last remaining VIP seat at the exact same millisecond**?
-Without strict concurrency control, you get **race conditions and double bookings** (two people get charged for the same seat).
+What happens when **100 concurrent users try to book the last remaining VIP seat at the exact same millisecond**?
+Without strict concurrency control and atomic transactions, you get **race conditions and double-bookings** (two users get charged for the exact same seat, causing severe financial and logistical failure).
 
-#### What is to be built:
+In this sprint, we build the core business logic of the platform:
 
-1. **Organizer / Seller Endpoints (`/services`, `/locations`)**:
-   - `POST /services`: Create events with either `slot_capacity` or `unit_assigned` mode.
-   - `POST /services/{id}/tiers`: Add pricing tiers.
-   - `POST /services/{id}/seats`: Bulk generate seats/units for an event.
-2. **Public Event Discovery**:
-   - `GET /services`: Filter events by date, location, price, and available capacity.
-   - `GET /services/{id}/seats`: View seat map with real-time status (`available` vs `reserved`).
-3. **Concurrency-Safe Booking Flow (`POST /bookings`)**:
-   - **For `slot_capacity` Events**:
-     - Use a PostgreSQL atomic update:  
-       `UPDATE services SET booked_count = booked_count + :qty WHERE id = :id AND (max_capacity - booked_count) >= :qty`
-   - **For `unit_assigned` Events (Seats)**:
-     - Use PostgreSQL **Pessimistic Locking**:  
-       `SELECT * FROM inventory_items WHERE id IN (:seat_ids) AND status = 'available' FOR UPDATE`
-     - Mark seats as `reserved` with a **10-minute temporary hold**.
-     - Alternative / Enhancement: Use a **Redis TTL Lock** (`SET seat:{id}:lock user_id EX 600 NX`) to reserve before hitting DB.
-4. **Booking Lifecycle**:
-   - `pending` (holding seats for 10 mins awaiting payment).
-   - Celery / Background cron or Redis expiration hook to release expired holds if unpaid.
+1. **Event & Venue Management** for Sellers/Organizers.
+2. **Public Event Discovery & Live Seat Maps** for Customers.
+3. **High-Concurrency Booking Engine** with PostgreSQL Pessimistic Row Locking (`SELECT FOR UPDATE`) and atomic capacity checks.
+4. **Temporary 10-Minute Hold Lifecycle** with automatic hold expiration and inventory release.
+
+---
+
+#### 🏗️ Architecture & Detailed System Workflow:
+
+```
+[Customer Request] ──> [Verify JWT & Verified Status]
+                             │
+                             ▼
+         [Select Booking Mode for Service]
+           ├── Mode A: 'slot_capacity' (General Admission)
+           │     └─ Atomic PostgreSQL UPDATE:
+           │        UPDATE services
+           │        SET booked_count = booked_count + :qty
+           │        WHERE id = :id AND (max_capacity - booked_count) >= :qty
+           │
+           └── Mode B: 'unit_assigned' (Specific Seats e.g. A-12)
+                 └─ Pessimistic Row Lock:
+                    SELECT * FROM inventory_items
+                    WHERE id IN (:seat_ids) AND service_id = :service_id
+                    FOR UPDATE
+                    (Freezes rows; concurrent requests queue up)
+                             │
+                             ▼
+            [Validate Status == 'available']
+            (If any seat already taken ➔ Rollback & return 409 Conflict)
+                             │
+                             ▼
+            [Transition Seats to 'reserved']
+            [Create Booking with status = 'pending']
+            [Attach 10-Minute Hold Expiry (UTC)]
+                             │
+                             ▼
+           [Return Booking Summary to Client]
+         (Awaiting Stripe Payment in Sprint 4)
+```
+
+---
+
+#### 📦 What Will Be Built:
+
+##### 1. Venue & Location Management (`app/routers/locations.py`)
+
+- **`POST /locations`**: Sellers create physical venues (City, Country, Address).
+- **`GET /locations`**: Public/seller listing of available locations.
+- **`GET /locations/{id}`**: Detailed location info and hosted events.
+- **`PUT /locations/{id}` & `DELETE /locations/{id}`**: Seller ownership validation.
+
+##### 2. Event & Service Management (`app/routers/services.py`)
+
+- **`POST /services`**: Sellers create events tied to a location with:
+  - `booking_mode`:
+    - **`slot_capacity`**: General admission pool (e.g., 500 tickets, no seat picking).
+    - **`unit_assigned`**: Seat map allocation (e.g., Row A Seat 1).
+  - `base_price`, `max_capacity`, date/time range.
+- **`PUT /services/{id}` & `DELETE /services/{id}`**: Restricted to event owner (`seller_id`).
+- **`POST /services/{id}/tiers`**: Add pricing tiers (e.g., VIP = $150, Early Bird = $80, Regular = $50).
+- **`POST /services/{id}/inventory/bulk`**: Bulk-generate seat inventories (e.g. generating `A-1` through `A-50` assigned to a specific tier).
+
+##### 3. Public Event Discovery & Live Seat Maps (`app/routers/services.py`)
+
+- **`GET /services`**: Public event feed with multi-parameter filtering:
+  - City / Country / Location ID.
+  - Date range (Upcoming events, weekend events).
+  - Price range (Min price to Max price).
+  - Booking mode and available capacity filter.
+  - Pagination (`limit`, `offset`) and sorting (by date, price).
+- **`GET /services/{id}`**: Full event detail including location, seller info, and available pricing tiers.
+- **`GET /services/{id}/seats`**: Live visual seat map:
+  - Real-time status for every seat (`available`, `reserved`, `booked`, `maintenance`).
+  - Tier grouping and pricing.
+
+##### 4. Concurrency-Safe Booking Engine (`app/routers/bookings.py`)
+
+- **`POST /bookings`**:
+  - Authenticated customer endpoint (`Depends(oauth2.get_verified_user)`).
+  - **Pessimistic Locking Mechanism (`SELECT ... FOR UPDATE`)**:
+    - Queries requested seat IDs inside an active database transaction with row-level lock.
+    - Ensures no two concurrent transactions can inspect or modify the same seats simultaneously.
+    - If any seat is not in `available` state $\rightarrow$ rollback and return `409 Conflict` ("Seat X is no longer available").
+  - **10-Minute Hold Creation**:
+    - Transitions seats from `available` $\rightarrow$ `reserved`.
+    - Inserts `assigns_unit` association records.
+    - Inserts `Booking` record with status `pending` and `expires_at = now() + 10 minutes`.
+    - Commits transaction atomically.
+
+##### 5. Booking Lifecycle & Automatic Seat Release Engine
+
+- **`GET /bookings/me`**: Customer views their active pending and confirmed bookings.
+- **`GET /bookings/{id}`**: Get specific booking detail (with countdown timer for payment).
+- **`DELETE /bookings/{id}/release`**: Early customer cancellation of a pending reservation hold (instantly returning seats to `available`).
+- **Background Hold Sweeper (`release_expired_holds`)**:
+  - Automatically identifies `pending` bookings whose 10-minute hold has elapsed without payment.
+  - Transitions `Booking.status` to `cancelled`.
+  - Reverts associated `InventoryItems.status` from `reserved` back to `available`.
+
+---
+
+#### 🚦 Sprint 3 Execution Order & Engineering Strategy:
+
+To build this systematically without getting trapped in debugging loops, we follow a strict **hybrid Test-First vs Build-First methodology**:
+
+```
+[1. Locations CRUD] ───────────► Write Tests First (TDD) ──► Build Router
+[2. Services & Inventory] ─────► Write Tests First (TDD) ──► Build Router
+[3. Booking Engine (Locking)] ─► Build Lock Core First ────► Manual Sanity Check ──► Immediate 50-Req Stress Test
+[4. Hold Expiration Sweeper] ──► Build Sweeper First ──────► Test with Forced Expired TTL
+[5. Public Discovery & Maps] ──► Search, Filter & Live Seat Maps
+```
+
+1. **Locations CRUD (`/locations`) — Write the test first (TDD)**:
+   - The contract is 100% known upfront: creation returns `201 Created` with expected fields, non-sellers get `403 Forbidden`, and cross-seller ownership violations get `403 Forbidden` on `PUT`/`DELETE`.
+   - Writing tests first costs nothing and immediately catches permission and ownership leaks.
+2. **Services, Tiers & Bulk Inventory — Write the test first (TDD)**:
+   - Same reasoning: schemas and contracts for valid `slot_capacity` vs `unit_assigned` events are clearly defined in the data model. Test-first locks down the validation rules before writing handlers.
+3. **Booking Engine (`POST /bookings` with `SELECT FOR UPDATE`) — Build it first**:
+   - **Do NOT write the concurrency test before you have written the lock**. You don't yet know your own failure modes: whether the transaction boundary is in the right place, whether you are locking the exact rows needed, or whether rollback properly reverts seat status.
+   - **Protocol**: Build the locking logic $\rightarrow$ manually hit it with two sequential requests to verify basic state transitions $\rightarrow$ **immediately write the 50-concurrent-request stress test before moving to any other feature**. That stress test is the centerpiece of your interview story; don't let it slip to "later," because "later" is where concurrency bugs hide.
+4. **Hold Expiration Sweeper — Build first, then test**:
+   - Sweeper logic is inherently about observing time progression. Build the cleanup sweeper first, then test it by creating a reservation, manually forcing an expired timestamp in the DB, and asserting the sweeper reclaims the seats to `available`.
+5. **Public Discovery & Live Seat Map**:
+   - Wire up multi-parameter filtering and real-time seat status visualization once the inventory and booking mechanics are battle-tested.
+
+---
+
+#### 📋 Sprint 3 Implementation Milestones:
+
+- [ ] **Milestone 3.1 — Locations CRUD (Test-First)**:
+  - Write `tests/test_locations.py` (seller-only creation, public listing, 403 on non-owner edit/delete).
+  - Implement `app/routers/locations.py` until all location tests pass green.
+- [ ] **Milestone 3.2 — Services, Tiers & Bulk Inventory (Test-First)**:
+  - Write `tests/test_services.py` (`slot_capacity` vs `unit_assigned` creation, tier pricing, bulk seat generation).
+  - Implement `app/routers/services.py` seller management endpoints until all service tests pass green.
+- [ ] **Milestone 3.3 — Concurrency-Safe Booking Core (Build-First)**:
+  - Implement `POST /bookings` in `app/routers/bookings.py` using PostgreSQL row-level pessimistic locking (`with_for_update()`).
+  - Implement atomic capacity check for `slot_capacity` events.
+  - Create 10-minute temporary holds in `pending` status with `reserved` seats.
+  - Perform manual 2-request sanity check on state transitions.
+- [ ] **Milestone 3.4 — High-Concurrency Stress Test Suite (Immediate)**:
+  - Write `tests/test_concurrency.py`: Fire 50 simultaneous requests against a single seat using `asyncio.gather` / `ThreadPoolExecutor`.
+  - Validate: Exactly 1 request succeeds with `201 Created`; 49 requests receive clean `409 Conflict`. Zero deadlocks, zero double-bookings.
+- [ ] **Milestone 3.5 — Hold Expiration & Automatic Sweeper (Build-First $\rightarrow$ Test)**:
+  - Implement background hold release sweeper function (`release_expired_holds`).
+  - Implement manual release endpoint (`DELETE /bookings/{id}/release`).
+  - Write lifecycle test: force-expire pending booking $\rightarrow$ run sweeper $\rightarrow$ assert seats return to `available`.
+- [ ] **Milestone 3.6 — Public Discovery & Real-Time Seat Map**:
+  - Implement `GET /services` (filter by city, date, price, capacity).
+  - Implement `GET /services/{id}/seats` (live visual status map: `available`, `reserved`, `booked`).
+
+---
+
+#### 🧪 Automated Concurrency & Booking Test Plan (Pytest):
+
+- **Concurrency Double-Booking Test (`tests/test_concurrency.py`)**:
+  - Use `asyncio.gather` or `concurrent.futures.ThreadPoolExecutor` to send 50 simultaneous booking requests for Seat #1.
+  - **Assertion**: Exactly 1 request receives `201 Created`; the remaining 49 receive `409 Conflict`.
+  - **Assertion**: Database contains exactly 1 booking record and Seat #1 status is `reserved`.
+- **Hold Expiration Test (`tests/test_booking_lifecycle.py`)**:
+  - Reserve seat $\rightarrow$ manually expire timestamp $\rightarrow$ run sweeper $\rightarrow$ assert seat returns to `available` and can be booked by another user.
+- **Role Enforcement Test**:
+  - Verify regular customers cannot create events or locations (`403 Forbidden`).
+  - Verify sellers can only edit/delete their own events.
+
+---
+
+#### 💡 Sprint 3 Learning Goal:
+
+> You must be able to explain to an interviewer:
+>
+> 1. What a **Race Condition** is in booking systems.
+> 2. The exact difference between **Pessimistic Locking** (`SELECT FOR UPDATE`) and **Optimistic Locking** (version columns), and why pessimistic locking is necessary for high-contention ticket drops.
+> 3. How a **temporary inventory hold lifecycle** prevents overselling without prematurely charging the user before Stripe checkout.
 
 ---
 
 ### Sprint 4: Stripe Payment Integration & Webhooks
 
-**Status**: ⏳ **PENDING**
+**Status**: ⏳ **UPNEXT**
 
 #### The Challenge:
 
@@ -257,15 +414,3 @@ Demonstrating that the system works reliably in production and proving with real
        - Without Redis Cache (e.g. 180ms avg, DB spikes).
        - With Redis Cache (e.g. 8ms avg, DB untouched).
      - Save this real benchmark in `docs/` as proof of high-concurrency engineering.
-
----
-
-## 🎯 Current Immediate Action Items
-
-1. **Sprint 2 Automated Test Suite (`pytest`)**:
-   - Create `tests/conftest.py` with test database, Redis client, and test authentication fixtures.
-   - Implement test modules: `test_users.py`, `test_auth.py`, `test_password_reset.py`, and `test_rbac_seller.py`.
-   - Run `pytest` via `.venv/bin/pytest` and verify 100% green test execution.
-2. **Transition to Sprint 3**:
-   - Create router `app/routers/services.py` for Event/Service CRUD.
-   - Implement the `SELECT FOR UPDATE` locking mechanism for `POST /bookings`.
