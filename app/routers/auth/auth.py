@@ -1,12 +1,11 @@
-from app import email
 from typing import Annotated
 from jose import JWTError, jwt
 from fastapi import APIRouter, Depends, HTTPException, status, Response, Request
 from fastapi.security import OAuth2PasswordRequestForm
 from sqlalchemy.orm import Session
 
-from .. import model, oauth2, schema, utils, redis_client
-from ..database import get_db
+from app import email, model, oauth2, redis_client, schema, utils
+from app.database import get_db
 
 router = APIRouter(
     tags=["Authentication"]

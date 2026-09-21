@@ -2,13 +2,11 @@ import random
 from datetime import datetime, timedelta, timezone
 from typing import Annotated
 
-from app import redis_client
-
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, status, Response
 from sqlalchemy.orm import Session
 
-from .. import email, model, oauth2, schema, utils
-from ..database import get_db
+from app import email, model, oauth2, redis_client, schema, utils
+from app.database import get_db
 
 # OTP configuration
 OTP_EXPIRY_MINUTES = 5
