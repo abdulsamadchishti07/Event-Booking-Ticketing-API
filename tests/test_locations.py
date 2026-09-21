@@ -1,4 +1,4 @@
-from pydantic_settings.sources.providers import json
+from fastapi import responses
 import httpx
 import pytest
 from sqlalchemy.orm import Session
@@ -23,12 +23,7 @@ async def test_location(
 
     # status and respose code
     assert response.status_code == 201
-    data = response.json() # unauthenticated request
-    response = await client.post("/locations", json={
-        "city": "Islamabad",
-        "country": "Pakistan",
-        "address_line": "Star City"
-    })
+    data = response.json() 
     
 
     assert data["city"] == "Bahawalpur"
@@ -40,7 +35,7 @@ async def test_location(
 # Customer is Forbidden
 async def test_create_losation_customer_forbidded(
     client: httpx.AsyncClient,
-    user_header: dict[str, str]
+    user_headers: dict[str, str]
 ):
     payload = {
         "city": "Bahawalpur",
@@ -48,7 +43,7 @@ async def test_create_losation_customer_forbidded(
         "address_line": "Star City",
     }
 
-    response = await client.post("/locations", headers=user_header, json=payload)
+    response = await client.post("/locations", headers=user_headers, json=payload)
     
     assert response.status_code == 403
 
@@ -66,3 +61,32 @@ async def test_create_location_unauthenticated(
     response = await client.post("/locations", json=payload)
 
     assert response.status_code == 401
+
+# all locations
+async def test_all_location(
+    client: httpx.AsyncClient,
+    seller_headers: dict[str, str]
+):
+    payload = {
+        "city": "Lahore",
+        "country": "Pakistan",
+        "address_line": "Gaddafi Stadium"
+    }
+    create_res = await client.post(
+        "/locations", headers=seller_headers, json=payload
+    )
+
+    assert create_res.status_code == 201
+
+    # get request (no headers/ unauthentication)
+    response = await client.get("/locations")
+    assert response.status_code == 200
+
+    data = response.json()
+
+    assert isinstance(data, list)
+    assert len(data) >=1
+
+    cities = [loc["city"] for loc in data]
+    assert "Lahore" in dict[str, str]
+
