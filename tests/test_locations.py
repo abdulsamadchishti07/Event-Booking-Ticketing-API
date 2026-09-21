@@ -90,3 +90,29 @@ async def test_all_location(
     cities = [loc["city"] for loc in data]
     assert "Lahore" in dict[str, str]
 
+# get location by id or get 404 
+async def test_get_location_by_id(
+    client: httpx.AsyncClient,
+    seller_headers: dict[str, str]
+):
+    payload = {
+        "city": "Karachi",
+        "country": "Pakistan",
+        "address_line": "National Stadium"
+    }
+    
+    create_res = await client.post("/locations", headers=seller_headers, json=payload)
+    assert create_res.status_code == 201
+    created_id = create_res.json()["id"]
+    
+    
+    response = await client.get(f"/locations/{created_id}")
+    assert response.status_code == 200
+    data = response.json()
+    
+    assert data["id"] == created_id
+    assert data["city"] == "Karachi"
+    
+
+    not_found_res = await client.get("/locations/999999")
+    assert not_found_res.status_code == 404
