@@ -5,8 +5,10 @@ from typing import Annotated
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, status, Response
 from sqlalchemy.orm import Session
 
-from app import email, model, oauth2, redis_client, schema, utils
-from app.database import get_db
+from app.core import oauth2, redis as redis_client
+from app.core import security as utils
+from app.database import get_db, model, schema
+from app.services import email
 
 # OTP configuration
 OTP_EXPIRY_MINUTES = 5
@@ -299,7 +301,8 @@ def update_user(
         update_data["password_hash"] = utils.hash(update_data.pop("password"))
 
     if update_data:
-        user_query.update(update_data, synchronize_session=False)
+        for key, value in update_data.items():
+            setattr(user, key, value)
         db.commit()
         db.refresh(user)
 
@@ -373,7 +376,7 @@ async def forgot_password(
     
     # Generate 6-digit OTP and store in Redis with 5-minute expiry (300 seconds)
     otp = f"{random.randint(100000, 999999)}"
-    await redis_client.redis_client.setex(f"reset_pwd_otp:{clean_email}", 300, otp)
+    await redis_client.redis_client.set(f"reset_pwd_otp:{clean_email}", otp, ex=300)
 
     # Send reset code email in the background
     background_tasks.add_task(email.send_password_reset_email, clean_email, otp)

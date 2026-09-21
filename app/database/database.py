@@ -2,7 +2,7 @@ from typing import Generator
 from sqlalchemy import create_engine
 from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
 
-from .config import settings
+from app.core.config import settings
 
 # Construct the SQLAlchemy database engine
 engine = create_engine(settings.database_url)

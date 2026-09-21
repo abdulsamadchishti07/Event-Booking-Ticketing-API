@@ -4,7 +4,7 @@ from typing import List, Optional
 
 from pydantic import BaseModel, ConfigDict, EmailStr, Field
 
-from .model import (
+from ..database.model import (
     BookingMode,
     BookingStatus,
     ItemStatus,

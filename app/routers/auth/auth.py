@@ -4,8 +4,10 @@ from fastapi import APIRouter, Depends, HTTPException, status, Response, Request
 from fastapi.security import OAuth2PasswordRequestForm
 from sqlalchemy.orm import Session
 
-from app import email, model, oauth2, redis_client, schema, utils
-from app.database import get_db
+from app.core import oauth2, redis as redis_client
+from app.core import security as utils
+from app.database import get_db, model, schema
+from app.services import email
 
 router = APIRouter(
     tags=["Authentication"]
@@ -69,7 +71,7 @@ async def login(
             await redis_client.redis_client.expire(failed_key, 900)
         # 5 consecutive failures = 15-minute lock
         if failed_attempts >= 5:
-            await redis_client.redis_client.setex(lock_key, 900, "locked")
+            await redis_client.redis_client.set(lock_key, "locked", ex=900)
             await redis_client.redis_client.delete(failed_key)
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
@@ -106,10 +108,10 @@ async def login(
     # Store active session in Redis with 7-day TTL (604,800 sec)
     session_ttl = oauth2.REFRESH_TOKEN_EXPIRE_DAYS * 24 * 60 * 60
 
-    await redis_client.redis_client.setex(
+    await redis_client.redis_client.set(
         f"session:{user.id}:{jti}",
-        session_ttl,
-        "active"
+        "active",
+        ex=session_ttl
     )
     # Attach Refresh Token into an HttpOnly Cookie
     response.set_cookie(
@@ -175,10 +177,10 @@ async def refresh_token(
         data={"sub": str(user.id)}
     )
     session_ttl = oauth2.REFRESH_TOKEN_EXPIRE_DAYS * 24 * 60 * 60
-    await redis_client.redis_client.setex(
+    await redis_client.redis_client.set(
         f"session:{user.id}:{new_jti}",
-        session_ttl,
-        "active"
+        "active",
+        ex=session_ttl
     )
 
     # 7. Update the HTTP Cookies with the rotated refresh token

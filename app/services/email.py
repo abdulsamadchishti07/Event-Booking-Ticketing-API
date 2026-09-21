@@ -6,12 +6,12 @@ from pathlib import Path
 
 from jinja2 import Environment, FileSystemLoader
 
-from .config import settings
+from app.core.config import settings
 
 logger = logging.getLogger(__name__)
 
 # Configure Jinja2 environment to load email HTML templates
-TEMPLATES_DIR = Path(__file__).resolve().parent / "templates"
+TEMPLATES_DIR = Path(__file__).resolve().parent.parent / "templates"
 jinja_env = Environment(
     loader=FileSystemLoader(TEMPLATES_DIR),
     autoescape=True

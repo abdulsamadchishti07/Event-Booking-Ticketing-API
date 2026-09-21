@@ -1,8 +1,7 @@
-from fastapi import HTTPException, status, Request, Depends
-
+from fastapi import Depends, HTTPException, Request, status
 import redis.asyncio as aioredis
-from .config import settings
 
+from .config import settings
 
 # 1. Global Redis Pool
 redis_client = aioredis.from_url(
@@ -11,27 +10,28 @@ redis_client = aioredis.from_url(
     max_connections=30
 )
 
+
 async def get_redis() -> aioredis.Redis:
     return redis_client
 
-def get_client_ip(request: Request)-> str:
+
+def get_client_ip(request: Request) -> str:
     """
     Safely extracts the real client IP.
     Checks X-Forwarded-For header first (for proxies/Cloudflare),
     then falls back to direct client host.
     """
-
-    forwarded =  request.headers.get("X-Forwarded-For")
+    forwarded = request.headers.get("X-Forwarded-For")
     if forwarded:
-         return forwarded.split(",")[0].strip()
+        return forwarded.split(",")[0].strip()
 
     if request.client:
         return request.client.host
     
     return "127.0.0.1"
-    
-class IPRateLimiting():
-    
+
+
+class IPRateLimiting:
     """
     Atomic rate-limiter using Redis:
     1. Increments the counter for this key.
@@ -39,7 +39,6 @@ class IPRateLimiting():
     3. Raises HTTP 429 if the count exceeds max_requests.
     """
 
-    # INCR returns the new count after incrementing
     def __init__(self, max_requests: int, window_seconds: int):
         self.max_requests = max_requests
         self.window_seconds = window_seconds
@@ -52,7 +51,7 @@ class IPRateLimiting():
         ip = get_client_ip(request)
         end_point = request.url.path
 
-        # construct key contaning ratelimit
+        # construct key containing ratelimit
         redis_key = f"Rate_Limit:{ip}:{end_point}"
 
         # Atomic Increment inside redis
@@ -60,7 +59,7 @@ class IPRateLimiting():
 
         # set expiration on the 1st hit
         if current_hit == 1:
-            await  redis.expire(redis_key, self.window_seconds)
+            await redis.expire(redis_key, self.window_seconds)
         
         # Block if it hit max hit
         if current_hit > self.max_requests:
@@ -85,12 +84,12 @@ async def check_email_and_otp_rate_limiting(
     clean_email = email.strip().lower()
     redis_key = f"Rate_limit_Email:{clean_email}:{action}"
 
-    # Attomic Increment
+    # Atomic Increment
     current_hits = await redis.incr(redis_key)
 
     # Set expiration on the 1st hit
     if current_hits == 1:
-        await  redis.expire(redis_key, window_seconds)
+        await redis.expire(redis_key, window_seconds)
 
     if current_hits > max_request:
         ttl = await redis.ttl(redis_key)
@@ -116,4 +115,3 @@ async def revoke_all_user_sessions(
     if session_keys:
         await redis.delete(*session_keys)
     return len(session_keys)
-

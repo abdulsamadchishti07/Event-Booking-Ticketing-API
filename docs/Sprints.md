@@ -289,7 +289,7 @@ To build this systematically without getting trapped in debugging loops, we foll
 
 #### 📋 Sprint 3 Implementation Milestones:
 
-- [ ] **Milestone 3.1 — Locations CRUD (Test-First)**:
+- [x] **Milestone 3.1 — Locations CRUD (Test-First)**:
   - Write `tests/test_locations.py` (seller-only creation, public listing, 403 on non-owner edit/delete).
   - Implement `app/routers/locations.py` until all location tests pass green.
 - [ ] **Milestone 3.2 — Services, Tiers & Bulk Inventory (Test-First)**:

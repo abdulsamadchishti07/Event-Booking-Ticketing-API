@@ -88,7 +88,7 @@ async def test_all_location(
     assert len(data) >=1
 
     cities = [loc["city"] for loc in data]
-    assert "Lahore" in dict[str, str]
+    assert "Lahore" in cities
 
 # get location by id or get 404 
 async def test_get_location_by_id(

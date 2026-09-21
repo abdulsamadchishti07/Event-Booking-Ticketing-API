@@ -7,9 +7,9 @@ from fastapi.security import OAuth2PasswordBearer
 from jose import JWTError, jwt
 from sqlalchemy.orm import Session
 
-from app import model, redis_client
-from app.config import settings
-from app.database import get_db
+from app.database import get_db, model
+from . import redis
+from .config import settings
 
 # JWT settings
 SECRET_KEY = settings.secret_key
@@ -40,30 +40,30 @@ def create_access_token(data: dict, expires_delta: timedelta | None = None) -> s
     to_encode.update({"exp": expire})
     return jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
 
-def create_fresh_token(data:dict) -> tuple[str,str]:
+
+def create_fresh_token(data: dict) -> tuple[str, str]:
     """
     Creates a long-lived JWT refresh token 7 days.
     Returns both the signed token and its unique session identifier (jti).
     """
-
     to_encode = data.copy()
     jti = str(uuid.uuid4())
     expire = datetime.now(timezone.utc) + timedelta(days=REFRESH_TOKEN_EXPIRE_DAYS)
 
     # We add 'jti' so Redis can track it, and 'type': 'refresh' so it cannot be used as an access token
-    to_encode.update({"exp":expire, "jti":jti, "type": "refresh"})
+    to_encode.update({"exp": expire, "jti": jti, "type": "refresh"})
     token = jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
 
     return token, jti
 
-# BlackList Token
+
+# Blacklist Token
 async def add_blacklist_token(token: str) -> None:
     """
     Decodes the access token to get its expiration time ('exp'),
     calculates how many seconds are left, and stores it in Redis.
     Redis will automatically delete the key once the token expires.
     """
-
     try:
         payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
         exp = payload.get("exp")
@@ -72,13 +72,14 @@ async def add_blacklist_token(token: str) -> None:
             now = datetime.now(timezone.utc).timestamp()
             remaining_seconds = int(exp - now)
             if remaining_seconds > 0:
-                await redis_client.redis_client.setex(
+                await redis.redis_client.set(
                     f"blacklist:{jti}",
-                    remaining_seconds,
-                    "revoked"
+                    "revoked",
+                    ex=remaining_seconds
                 )
     except JWTError:
         pass  # If the token is already invalid, no need to blacklist
+
 
 async def get_current_user(
     token: Annotated[str, Depends(oauth2_scheme)],
@@ -105,13 +106,12 @@ async def get_current_user(
         raise credentials_exception
 
     # Fast lookup by jti:
-    if jti and await redis_client.redis_client.get(f"blacklist:{jti}"):
+    if jti and await redis.redis_client.get(f"blacklist:{jti}"):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Token has been revoked. Please Login again",
             headers={"WWW-Authenticate": "Bearer"}
         )
-
 
     user = db.query(model.User).filter(model.User.id == int(user_id)).first()
     if user is None:
