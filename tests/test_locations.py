@@ -116,3 +116,75 @@ async def test_get_location_by_id(
 
     not_found_res = await client.get("/locations/999999")
     assert not_found_res.status_code == 404
+
+# Test Update Location
+async def test_update_location(
+    client: httpx.AsyncClient,
+    seller_headers: dict[str, str],
+    user_headers: dict[str, str]
+):
+
+    create_res = await client.post(
+        "/locations",
+        headers=seller_headers,
+        json={"city": "Multan", "country": "Pakistan", "address_line": "Old Address"}
+    )
+    assert create_res.status_code == 201
+    loc_id = create_res.json()["id"]
+
+    # Customer tries to update
+    cust_res = await client.put(
+        f"/locations/{loc_id}",
+        headers=user_headers,
+        json={"address_line": "Customer Hacked Address"}
+    )
+    assert cust_res.status_code == 403
+
+    # Owner updates address
+    update_res = await client.put(
+        f"/locations/{loc_id}",
+        headers=seller_headers,
+        json={"address_line": "Updated New Address"}
+    )
+    assert update_res.status_code == 200
+    assert update_res.json()["address_line"] == "Updated New Address"
+    assert update_res.json()["city"] == "Multan"
+
+    # Non-existent location
+    not_found_res = await client.put(
+        "/locations/999999",
+        headers=seller_headers,
+        json={"city": "Nowhere"}
+    )
+    assert not_found_res.status_code == 404
+
+
+# Test Delete Location
+async def test_delete_location(
+    client: httpx.AsyncClient,
+    seller_headers: dict[str, str],
+    user_headers: dict[str, str]
+):
+
+    create_res = await client.post(
+        "/locations",
+        headers=seller_headers,
+        json={"city": "Peshawar", "country": "Pakistan", "address_line": "Stadium Rd"}
+    )
+    assert create_res.status_code == 201
+    loc_id = create_res.json()["id"]
+
+    cust_del = await client.delete(f"/locations/{loc_id}", headers=user_headers)
+    assert cust_del.status_code == 403
+
+    # Owner deletes location
+    del_res = await client.delete(f"/locations/{loc_id}", headers=seller_headers)
+    assert del_res.status_code == 204
+
+    # Verify it is really gone 
+    get_res = await client.get(f"/locations/{loc_id}")
+    assert get_res.status_code == 404
+
+    # Deleting non-existent location 
+    del_not_found = await client.delete("/locations/999999", headers=seller_headers)
+    assert del_not_found.status_code == 404
