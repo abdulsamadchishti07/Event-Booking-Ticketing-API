@@ -71,3 +71,67 @@ def get_location_by_id(
             detail=f"Location with id {id} not found"
         )
     return location
+
+
+@router.put(
+    "/{id}",
+    response_model=schema.LocationOut,
+    summary="Update a location"
+)
+def update_location(
+    id: int,
+    location_in: schema.LocationUpdate,
+    current_user: Annotated[model.User, Depends(oauth2.require_seller)],
+    db: Session = Depends(get_db)
+):
+    location = db.query(model.Location).filter(model.Location.id == id).first()
+    if not location:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Location with id {id} not found"
+        )
+
+    # Ownership check
+    if location.seller_id != current_user.seller_profile.id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Not authorized to update this location"
+        )
+
+    # Update only provided fields
+    update_data = location_in.model_dump(exclude_unset=True)
+    for key, value in update_data.items():
+        setattr(location, key, value)
+
+    db.commit()
+    db.refresh(location)
+    return location
+
+
+@router.delete(
+    "/{id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+    summary="Delete a location"
+)
+def delete_location(
+    id: int,
+    current_user: Annotated[model.User, Depends(oauth2.require_seller)],
+    db: Session = Depends(get_db)
+):
+    location = db.query(model.Location).filter(model.Location.id == id).first()
+    if not location:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Location with id {id} not found"
+        )
+
+    # Ownership check
+    if location.seller_id != current_user.seller_profile.id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Not authorized to delete this location"
+        )
+
+    db.delete(location)
+    db.commit()
+    return None
