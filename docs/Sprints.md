@@ -292,7 +292,7 @@ To build this systematically without getting trapped in debugging loops, we foll
 - [x] **Milestone 3.1 — Locations CRUD (Test-First)**:
   - Write `tests/test_locations.py` (seller-only creation, public listing, 403 on non-owner edit/delete).
   - Implement `app/routers/locations.py` until all location tests pass green.
-- [ ] **Milestone 3.2 — Services, Tiers & Bulk Inventory (Test-First)**:
+- [_] **Milestone 3.2 — Services, Tiers & Bulk Inventory (Test-First)**:
   - Write `tests/test_services.py` (`slot_capacity` vs `unit_assigned` creation, tier pricing, bulk seat generation).
   - Implement `app/routers/services.py` seller management endpoints until all service tests pass green.
 - [ ] **Milestone 3.3 — Concurrency-Safe Booking Core (Build-First)**:

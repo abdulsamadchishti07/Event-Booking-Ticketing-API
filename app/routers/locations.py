@@ -1,3 +1,5 @@
+from sqlalchemy import or_
+from typing import Optional
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, status
@@ -45,13 +47,33 @@ def create_location(
 @router.get(
     "",
     response_model=list[schema.LocationOut],
-    summary="Get all locations"
+    summary="Get all locations with optional search and filters"
 )
 def get_locations(
+    search: Optional[str] = None,
+    city: Optional[str] = None,
+    country: Optional[str] = None,
     db: Session = Depends(get_db)
 ):
-    locations = db.query(model.Location).all()
-    return locations
+    query = db.query(model.Location)
+
+    # Universal search bar (matches city, country, or address)
+    if search:
+        query = query.filter(
+            or_(
+                model.Location.city.ilike(f"%{search}%"),
+                model.Location.country.ilike(f"%{search}%"),
+                model.Location.address_line.ilike(f"%{search}%")
+            )
+        )
+
+    # Specific field filters
+    if city:
+        query = query.filter(model.Location.city.ilike(f"%{city}%"))
+    if country:
+        query = query.filter(model.Location.country.ilike(f"%{country}%"))
+
+    return query.all()
 
 
 @router.get(
