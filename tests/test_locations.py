@@ -1,3 +1,4 @@
+from redis import client
 from fastapi import responses
 import httpx
 import pytest
@@ -188,3 +189,30 @@ async def test_delete_location(
     # Deleting non-existent location 
     del_not_found = await client.delete("/locations/999999", headers=seller_headers)
     assert del_not_found.status_code == 404
+
+# Test Search by partial city, country, or keyword
+async def test_search_location(
+    client: httpx.AsyncClient,
+    seller_headers: dict[str, str]
+):
+    await client.post(
+        "/locations",
+        headers=seller_headers,
+        json={"city": "Faisalabad", "country": "Pakistan", "address_line": "Iqbal Cricket Stadium"}
+    )
+    # 2. Search by  lowercase city
+    res_city = await client.get("/locations?city=faisal")
+    assert res_city.status_code == 200
+    cities = [loc["city"] for loc in res_city.json()]
+    assert "Faisalabad" in cities
+
+    # 3. Universal search by address keyword: "Football"
+    res_search = await client.get("/locations?search=football")
+    assert res_search.status_code == 200
+    addresses = [loc["address_line"] for loc in res_search.json()]
+    assert any("Footbal" in addr for addr in addresses)
+
+    # 4. Search for something non-existent and it returns empty list
+    res_empty = await client.get("/locations?search=cricket")
+    assert res_empty.status_code == 200
+    assert len(res_empty.json()) == 0
