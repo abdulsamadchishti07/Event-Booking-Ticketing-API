@@ -53,6 +53,8 @@ def get_locations(
     search: Optional[str] = None,
     city: Optional[str] = None,
     country: Optional[str] = None,
+    limit: int =20,
+    offset: int = 0,
     db: Session = Depends(get_db)
 ):
     query = db.query(model.Location)
@@ -73,7 +75,7 @@ def get_locations(
     if country:
         query = query.filter(model.Location.country.ilike(f"%{country}%"))
 
-    return query.all()
+    return query.offset(offset).limit(limit).all()
 
 
 @router.get(
@@ -140,11 +142,18 @@ def delete_location(
     current_user: Annotated[model.User, Depends(oauth2.require_seller)],
     db: Session = Depends(get_db)
 ):
-    location = db.query(model.Location).filter(model.Location.id == id).first()
+    location = db.query(model.Location).filter(model.Location.id == id).first()  
     if not location:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Location with id {id} not found"
+        )
+    
+    # check if current location has event scheduled
+    if location.services:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Cannot delete location that has active events/services scheduled"
         )
 
     # Ownership check

@@ -198,7 +198,7 @@ async def test_search_location(
     await client.post(
         "/locations",
         headers=seller_headers,
-        json={"city": "Faisalabad", "country": "Pakistan", "address_line": "Iqbal Cricket Stadium"}
+        json={"city": "Faisalabad", "country": "Pakistan", "address_line": "Iqbal football Stadium"}
     )
     # 2. Search by  lowercase city
     res_city = await client.get("/locations?city=faisal")
@@ -210,7 +210,7 @@ async def test_search_location(
     res_search = await client.get("/locations?search=football")
     assert res_search.status_code == 200
     addresses = [loc["address_line"] for loc in res_search.json()]
-    assert any("Footbal" in addr for addr in addresses)
+    assert any("football" in addr for addr in addresses)
 
     # 4. Search for something non-existent and it returns empty list
     res_empty = await client.get("/locations?search=cricket")
