@@ -19,7 +19,7 @@ async def create_test_location(
         }
     )
 
-# Verified Seller creates a slot_capacity event
+# Verified Seller creates a slot_capacity event (General)
 async def test_create_service_slot_capacity(
     client: httpx.AsyncClient,
     seller_user: model.User,
@@ -38,4 +38,12 @@ async def test_create_service_slot_capacity(
 
     responses = await client.post("/services", headers=seller_headers, json=payload) 
     assert responses.status_code == 201
-    data = responses
+    data = responses.json()
+
+    assert data["service_name"] == ["Tech Conference 2026"]
+    assert data["booking_name"] == "slot_capacity"
+    assert data["max_capacity"] == 500
+    assert float(data["base_price"]) == 50.00
+    assert data["seller_id"] == seller_user.seller_profile.id
+    assert "id" in data
+
