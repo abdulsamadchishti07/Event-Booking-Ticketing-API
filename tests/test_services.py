@@ -1,3 +1,4 @@
+from fastapi import responses
 from dateparser import data
 import httpx
 import pytest
@@ -75,4 +76,45 @@ async def test_create_service_unit_assigned(
     assert data["service_name"] == "THE Avengers Doom Days"
     assert data["booking_mode"] == "unit_assigned"
     assert data["seller_id"] == seller_user.seller_profile.id
-    
+
+# User without seller acoount are not being able to create a service
+async def test_create_service_customer_forbiden(
+    client: httpx.AsyncClient,
+    seller_headers: dict[str, str],
+    useer_header: dict[str, str]
+):
+    location_id = create_test_location(client, seller_headers)
+
+    payload = {
+        "service_name": "Unauthorized Event",
+        "location_id": location_id,
+        "booking_mode": "slot_capacity",
+        "base_price": 10.00
+    }
+
+    responses =  await client.post(
+        "/services",
+        headers=useer_header,
+        json=payload
+    )
+    assert responses.status_code == 403
+
+# Service with non-existent location is rejected
+async def test_create_service_invalid_location(
+    client: httpx.AsyncClient,
+    seller_headers: dict[str, str]
+):
+
+    payload = {
+        "service_name": "Unauthorized Event",
+        "location_id": 9999999999999,
+        "booking_mode": "slot_capacity",
+        "base_price": 10.00
+    }
+
+    responses = await client.post(
+        "/service",
+        headers=seller_headers,
+        json=payload
+    )
+    assert responses.status_code == 404
