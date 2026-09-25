@@ -1,3 +1,4 @@
+from dateparser import data
 import httpx
 import pytest
 
@@ -41,9 +42,37 @@ async def test_create_service_slot_capacity(
     data = responses.json()
 
     assert data["service_name"] == ["Tech Conference 2026"]
-    assert data["booking_name"] == "slot_capacity"
+    assert data["booking_mode"] == "slot_capacity"
     assert data["max_capacity"] == 500
     assert float(data["base_price"]) == 50.00
     assert data["seller_id"] == seller_user.seller_profile.id
     assert "id" in data
 
+# Verify Seller create the unit_assigned event (Number Seating)
+async def test_create_service_unit_assigned(
+    client: httpx.AsyncClient,
+    seller_user: model.User,
+    seller_headers: dict[str, str]
+):
+    location_id =  create_test_location(client, seller_headers)
+
+    payload = {
+        "service_name": "THE Avengers Doom Days",
+        "service_desc": "Ticket of Movie The new so called avengergs getting betting by Dr.Victor Doom",
+        "location_id": location_id,
+        "booking_mode": "unit_assigned",
+        "base_price": 100.00
+    }
+
+    response = await client.post(
+        "/services",
+        headers=seller_headers,
+        json=payload
+    )
+    assert response.status_code == 201
+    data = response.json()
+
+    assert data["service_name"] == "THE Avengers Doom Days"
+    assert data["booking_mode"] == "unit_assigned"
+    assert data["seller_id"] == seller_user.seller_profile.id
+    
