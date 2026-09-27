@@ -66,3 +66,64 @@ def create_services(
     db.refresh(new_services)
 
     return new_services
+
+# ==========================================================
+# 2. Add Pricing Tier to an Event
+# ==========================================================
+@router.post(
+
+    "/{service_id}/tiers",
+    status_code=status.HTTP_201_CREATED,
+    response_model=schema.ServiceTierOut,
+    summary="Pricing tier to an event"
+)
+def create_service_tier(
+    service_id: int,
+    tier_in: schema.ServiceTierCreate,
+    current_user: Annotated[model.User, Depends(oauth2.require_seller)],
+    db: Session = Depends(get_db)
+):
+    # Verifyied Seller
+    if not current_user.seller_profile:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="User does not have an active seller profile"
+        )
+    
+    # Check if service exits or not
+    serivice = db.query(model.Services).filter(model.Services.id == service_id).first()
+    if not serivice:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Service with id {service_id} not found"
+            )
+    
+    # ownership check only owner can make the ticket
+    if serivice.seller_id != current_user.seller_profile.id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=f"Service with id {service_id} not found"
+        )
+    
+    # Check for duplicate tier name on this service
+    existing_tier = db.query(model.ServiceTier).filter(
+        model.ServiceTier.service_id == service_id,
+        model.ServiceTier.name.ilike(tier_in.name)
+    ).first()
+    if existing_tier:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"Tier with name '{tier_in.name}' already exists for this service"
+        )
+
+    new_tier = model.ServiceTier(
+        service_id=service_id,
+        name=tier_in.name,
+        price=tier_in.price
+    )
+
+    db.add(new_tier)
+    db.commit()
+    db.refresh(new_tier)
+
+    return new_tier
