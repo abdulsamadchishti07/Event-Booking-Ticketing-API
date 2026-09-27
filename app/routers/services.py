@@ -127,3 +127,94 @@ def create_service_tier(
     db.refresh(new_tier)
 
     return new_tier
+
+# ==========================================================
+# 3. Bulk Generate Inventory Items (Seats/Units)
+# ==========================================================
+@router.post(
+    "/{service_id}/inventory/bulk",
+    status_code=status.HTTP_201_CREATED,
+    summary="Bulk generate seats/units for an event"
+)
+def bulk_create_inventory(
+    service_id: int,
+    inventory_in: schema.BulkInventoryCreate,
+    current_user: Annotated[model.User, Depends(oauth2.require_seller)],
+    db: Session = Depends(get_db)
+):
+
+    # 1
+    if not current_user.seller_profile:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="User does not have an active seller profile"
+        )
+
+    # 2
+    service = db.query(model.Services).filter(model.Services.id == service_id).first()
+    if not service:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Service with id {service_id} not found"
+        )
+    
+    # 3
+    # ownership check only owner can make the ticket
+    if service.seller_id != current_user.seller_profile.id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=f"Service with id {service_id} not found"
+        )
+    
+    # 4
+    # only unit_assigind can hace seats of the units generates
+    if service.booking_mode != model.BookingMode.UNIT_ASSIGNED:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Bulk inventory generation is only allowed for unit_assigned services"
+        )
+
+    # 5
+    # check it already exists and belong to the same service
+    tier = db.query(model.ServiceTier).filter(
+        model.ServiceTier.id == inventory_in.tier_id,
+        model.ServiceTier.service_id == service_id
+    ).first()
+    if not tier:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Tier with id {inventory_in.tier_id} not found for this service"
+        )
+
+    # 6 
+    # Check for duplicate identifier codes in database for this service
+    existing_items = db.query(model.InventoryItems).filter(
+        model.InventoryItems.service_id == service_id,
+        model.InventoryItems.identifier_code.in_(inventory_in.identifier_codes)
+    ).all()
+    if existing_items:
+        duplicates = [item.identifier_code for item in existing_items]
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"Identifier codes already exist: {duplicates}"
+        )
+
+    # 7
+    # Bulk create all seats
+    new_items = [
+        model.InventoryItems(
+            service_id=service_id,
+            tier_id=inventory_in.tier_id,
+            identifier_code=code,
+            status=model.ItemStatus.AVAILABLE
+        )
+        for code in inventory_in.identifier_codes
+    ]
+
+    db.add_all(new_items)
+    db.commit()
+
+    return {
+        "message": f"Successfully created {len(new_items)} inventory items",
+        "created_count": len(new_items)
+    }

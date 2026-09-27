@@ -332,7 +332,7 @@ async def test_bulk_inventory_duplicate_seat_conflict(
         headers=seller_headers,
         json={
             "tier_id": tier_id,
-            "identifier_code": "B-1",
+            "identifier_codes": ["B-1"],
         },
     )
     assert existing_res.status_code == 201
