@@ -224,6 +224,11 @@ class InventoryItemOut(InventoryItemBase):
     model_config = ConfigDict(from_attributes=True)
 
 
+
+class BulkInventoryCreate(BaseModel):
+    tier_id: int
+    identifier_codes: List[str] = Field(..., min_length=1, max_length=500)
+
 # ==========================================================
 # 7. Booking Schemas
 # ==========================================================

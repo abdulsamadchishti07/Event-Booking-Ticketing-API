@@ -216,3 +216,135 @@ async def test_create_tier_customer_forbidden(
         json={"name": "Gold", "price": 30.00}
     )
     assert response.status_code == 403
+
+# 8 Verifiied Seller bulk generate seats for a unit_assigned
+async def test_bulk_inventory_generator_success(
+    client: httpx.AsyncClient,
+    seller_headers: dict[str, str]
+):
+    loc_id = await create_test_location(client, seller_headers)
+    # Create venue, unit_assigned event, and a tier
+    service_res = await client.post(
+        "/services",
+        headers=seller_headers,
+        json={
+            "service_name": "Cinema Premier",
+            "location_id": loc_id,
+            "booking_mode": "unit_assigned",
+            "base_price": 15.00
+        }
+    )
+
+    service_id = service_res.json()["id"]
+
+    tier_res = await client.post(
+        f"/services/{service_id}/tiers",
+        headers=seller_headers,
+        json={"name": "Standard", "price": 15.00}
+    )
+
+    tier_id = tier_res.json()["id"]
+
+    # Buld Genereate Seates
+    payload = {
+        "tier_id": tier_id,
+        "identifier_codes": ["A-1", "A-2", "A-3", "A-4", "A-5"]
+    }
+
+    responses = await client.post(
+        f"/services/{service_id}/inventory/bulk",
+        headers=seller_headers,
+        json=payload
+    )
+
+    assert responses.status_code == 201
+    data = responses.json()
+    assert data["created_count"] == 5
+
+# 9. Bulk seat generation rejected for slot_capacity events
+async def test_bulk_inventory_slot_capacity_rejected(
+    client: httpx.AsyncClient,
+    seller_headers: dict[str, str]
+):
+    loc_id = await create_test_location(client, seller_headers)
+    service_res = await client.post(
+        "/services",
+        headers=seller_headers,
+        json={
+            "service_name": "Standing Concert",
+            "location_id": loc_id,
+            "booking_mode": "slot_capacity",
+            "max_capacity": 500,
+            "base_price": 25.00
+        }
+    )
+
+    service_id = service_res.json()["id"]
+
+    tier_res= await client.post(
+        f"services/{service_id}/tiers",
+        headers=seller_headers,
+        json={"name": "General", "price": 25.00}
+    )
+    tier_id = tier_res.json()["id"]
+
+    responses = await client.post(
+        f"/services/{service_id}/inventory/bulk",
+        headers=seller_headers,
+        json={"tier_id": tier_id, "identifier_codes": ["Seat-1"]}
+    )
+
+    assert responses.status_code == 400
+
+async def test_bulk_inventory_duplicate_seat_conflict(
+    client: httpx.AsyncClient,
+    seller_headers: dict[str, str],
+):
+    loc_id = await create_test_location(client, seller_headers)
+
+    service_res = await client.post(
+        "/services",
+        headers=seller_headers,
+        json={
+            "service_name": "Theater Show",
+            "location_id": loc_id,
+            "booking_mode": "unit_assigned",
+            "base_price": 50.00,
+        },
+    )
+    assert service_res.status_code == 201
+    service_id = service_res.json()["id"]
+
+    tier_res = await client.post(
+        f"/services/{service_id}/tiers",
+        headers=seller_headers,
+        json={
+            "name": "Balcony",
+            "price": 50.00,
+        },
+    )
+    assert tier_res.status_code == 201
+    tier_id = tier_res.json()["id"]
+
+    # Create B-1 first.
+    existing_res = await client.post(
+        f"/services/{service_id}/inventory/bulk",
+        headers=seller_headers,
+        json={
+            "tier_id": tier_id,
+            "identifier_code": "B-1",
+        },
+    )
+    assert existing_res.status_code == 201
+
+    # B-1 already exists, so the bulk request should conflict.
+    res_dup = await client.post(
+        f"/services/{service_id}/inventory/bulk",
+        headers=seller_headers,
+        json={
+            "tier_id": tier_id,
+            "identifier_codes": ["B-1", "B-2"],
+        },
+    )
+
+    assert res_dup.status_code == 409
