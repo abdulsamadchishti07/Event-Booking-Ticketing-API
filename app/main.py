@@ -1,6 +1,6 @@
 from fastapi import FastAPI
 
-from .routers import locations, services
+from .routers import locations, services, bookings
 from .routers.auth import auth, users
 
 app = FastAPI(
@@ -14,6 +14,7 @@ app.include_router(users.router)
 app.include_router(auth.router)
 app.include_router(locations.router)
 app.include_router(services.router)
+app.include_router(bookings.router)
 
 @app.get("/", tags=["Health"])
 def root():

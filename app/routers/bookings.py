@@ -65,7 +65,7 @@ def created_booking(
         # 2.4
         # Check if any seats is already taken
         for seat in seats:
-            if seat.status == model.ItemStatus.AVAILABLE:
+            if seat.status != model.ItemStatus.AVAILABLE:
                 raise HTTPException(
                     status_code=status.HTTP_409_CONFLICT,
                     detail=f"Seat '{seat.identifier_code}' is currently unavailable (status: {seat.status})"
@@ -74,7 +74,7 @@ def created_booking(
         # 2.5
         # Change seat status to RESERVED for the 10-minute hold
         for seat in seats:
-            seat.status == model.ItemStatus.RESERVED
+            seat.status = model.ItemStatus.RESERVED
         
         # 2.6
         # Create the booking record
@@ -86,7 +86,7 @@ def created_booking(
             start_time=booking_in.start_time,
             end_time=booking_in.end_time,
             status=model.BookingStatus.PENDING,
-            expires_at=now + timedelta(minutes=HOLD_DURATION_MINUTES)
+        #    expires_at=now + timedelta(minutes=HOLD_DURATION_MINUTES)
         )
         new_booking.assigned_units = seats
         

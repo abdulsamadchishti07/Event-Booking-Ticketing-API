@@ -230,11 +230,13 @@ def bulk_create_inventory(
             identifier_code=code,
             status=model.ItemStatus.AVAILABLE
         )
-        for code in inventory_in.identifier_codes
+        for code in inventory_in.identifier_codes   # Well it will take O(n) time to make the seats
     ]
 
     try:
         db.add_all(new_items)
+        # if db.add() used it when each time a loop create the seat it has to commit each and everytime in the loop creating the obect took around 1ms if it commit each time it would took 1 to 3 sec on each seats 
+        # But using the add_all it will commit the all the seats in one go. 
         db.commit()
     except IntegrityError:
         db.rollback()
