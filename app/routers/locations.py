@@ -2,7 +2,8 @@ from sqlalchemy import or_
 from typing import Optional
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.database import get_db, model, schema
@@ -53,8 +54,8 @@ def get_locations(
     search: Optional[str] = None,
     city: Optional[str] = None,
     country: Optional[str] = None,
-    limit: int =20,
-    offset: int = 0,
+    limit: int = Query(20, ge=1, le=100),
+    offset: int = Query(0, ge=0),
     db: Session = Depends(get_db)
 ):
     query = db.query(model.Location)
@@ -108,6 +109,12 @@ def update_location(
     current_user: Annotated[model.User, Depends(oauth2.require_seller)],
     db: Session = Depends(get_db)
 ):
+    if not current_user.seller_profile:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="User does not have seller profile"
+        )
+
     location = db.query(model.Location).filter(model.Location.id == id).first()
     if not location:
         raise HTTPException(
@@ -127,8 +134,15 @@ def update_location(
     for key, value in update_data.items():
         setattr(location, key, value)
 
-    db.commit()
-    db.refresh(location)
+    try:
+        db.commit()
+        db.refresh(location)
+    except IntegrityError:
+        db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Failed to update location due to database constraint"
+        )
     return location
 
 
@@ -142,6 +156,12 @@ def delete_location(
     current_user: Annotated[model.User, Depends(oauth2.require_seller)],
     db: Session = Depends(get_db)
 ):
+    if not current_user.seller_profile:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="User does not have seller profile"
+        )
+
     location = db.query(model.Location).filter(model.Location.id == id).first()  
     if not location:
         raise HTTPException(
@@ -149,20 +169,27 @@ def delete_location(
             detail=f"Location with id {id} not found"
         )
     
-    # check if current location has event scheduled
-    if location.services:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Cannot delete location that has active events/services scheduled"
-        )
-
-    # Ownership check
+    # 1. Ownership check MUST run before business rule check (fail closed, prevent info leak)
     if location.seller_id != current_user.seller_profile.id:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Not authorized to delete this location"
         )
 
-    db.delete(location)
-    db.commit()
+    # 2. Business rule check: check if current location has event scheduled
+    if location.services:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Cannot delete location that has active events/services scheduled"
+        )
+
+    try:
+        db.delete(location)
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Cannot delete location that has active events/services scheduled"
+        )
     return None

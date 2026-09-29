@@ -1,6 +1,7 @@
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, status
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.core import oauth2
@@ -50,6 +51,13 @@ def create_services(
             detail="max_capacity is required for slot_capacity booking mode"
         )
 
+    # Validate unit_assigned cannot have max_capacity
+    if services_in.booking_mode == model.BookingMode.UNIT_ASSIGNED and services_in.max_capacity is not None:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="max_capacity cannot be set for unit_assigned booking mode"
+        )
+
     # Create the service linked to current seller
     new_services = model.Services(
         seller_id=current_user.seller_profile.id,
@@ -61,9 +69,16 @@ def create_services(
         base_price=services_in.base_price
     )
 
-    db.add(new_services)
-    db.commit()
-    db.refresh(new_services)
+    try:
+        db.add(new_services)
+        db.commit()
+        db.refresh(new_services)
+    except IntegrityError:
+        db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Could not create service due to database constraint"
+        )
 
     return new_services
 
@@ -102,7 +117,7 @@ def create_service_tier(
     if serivice.seller_id != current_user.seller_profile.id:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail=f"Service with id {service_id} not found"
+            detail="Not authorized to modify this service"
         )
     
     # Check for duplicate tier name on this service
@@ -122,9 +137,16 @@ def create_service_tier(
         price=tier_in.price
     )
 
-    db.add(new_tier)
-    db.commit()
-    db.refresh(new_tier)
+    try:
+        db.add(new_tier)
+        db.commit()
+        db.refresh(new_tier)
+    except IntegrityError:
+        db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"Tier with name '{tier_in.name}' already exists for this service"
+        )
 
     return new_tier
 
@@ -163,7 +185,7 @@ def bulk_create_inventory(
     if service.seller_id != current_user.seller_profile.id:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail=f"Service with id {service_id} not found"
+            detail="Not authorized to modify this service"
         )
     
     # 4
@@ -211,8 +233,15 @@ def bulk_create_inventory(
         for code in inventory_in.identifier_codes
     ]
 
-    db.add_all(new_items)
-    db.commit()
+    try:
+        db.add_all(new_items)
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="One or more identifier codes already exist for this service"
+        )
 
     return {
         "message": f"Successfully created {len(new_items)} inventory items",

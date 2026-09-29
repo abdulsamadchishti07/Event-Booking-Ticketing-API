@@ -2,7 +2,7 @@ from datetime import date, datetime
 from decimal import Decimal
 from typing import List, Optional
 
-from pydantic import BaseModel, ConfigDict, EmailStr, Field
+from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator
 
 from ..database.model import (
     BookingMode,
@@ -228,6 +228,18 @@ class InventoryItemOut(InventoryItemBase):
 class BulkInventoryCreate(BaseModel):
     tier_id: int
     identifier_codes: List[str] = Field(..., min_length=1, max_length=500)
+
+    @field_validator("identifier_codes")
+    @classmethod
+    def validate_unique_identifier_codes(cls, codes: List[str]) -> List[str]:
+        for code in codes:
+            if not code or len(code.strip()) == 0:
+                raise ValueError("Identifier codes cannot be empty")
+            if len(code) > 20:
+                raise ValueError("Identifier code cannot exceed 20 characters")
+        if len(codes) != len(set(codes)):
+            raise ValueError("Duplicate identifier codes in the request are not allowed")
+        return codes
 
 # ==========================================================
 # 7. Booking Schemas

@@ -216,3 +216,137 @@ async def test_search_location(
     res_empty = await client.get("/locations?search=cricket")
     assert res_empty.status_code == 200
     assert len(res_empty.json()) == 0
+
+
+# Test: delete_location ownership check runs BEFORE business logic check (fail closed, no info leak)
+async def test_delete_location_ownership_check_runs_before_business_rule(
+    client: httpx.AsyncClient,
+    seller_headers: dict[str, str],
+    db_session: Session
+):
+    # 1. Seller A creates a location
+    loc_res = await client.post(
+        "/locations",
+        headers=seller_headers,
+        json={"city": "Islamabad", "country": "Pakistan", "address_line": "F-9 Park"}
+    )
+    assert loc_res.status_code == 201
+    loc_id = loc_res.json()["id"]
+
+    # 2. Attach a service to this location
+    service_res = await client.post(
+        "/services",
+        headers=seller_headers,
+        json={
+            "service_name": "Park Festival",
+            "location_id": loc_id,
+            "booking_mode": "slot_capacity",
+            "max_capacity": 500,
+            "base_price": 20.00
+        }
+    )
+    assert service_res.status_code == 201
+
+    # 3. Create a Second Seller (Seller B)
+    from datetime import date
+    from app import oauth2, utils
+
+    seller_b = model.User(
+        name="Second Seller",
+        email="seller_b@example.com",
+        password_hash=utils.hash("Password123!"),
+        dob=date(1991, 1, 1),
+        role=model.UserRole.SELLER,
+        phone_no="+1999999901",
+        is_verified=True,
+    )
+    db_session.add(seller_b)
+    db_session.commit()
+    db_session.refresh(seller_b)
+
+    seller_b_profile = model.SellerProfile(
+        user_id=seller_b.id,
+        business_name="Seller B Biz",
+    )
+    db_session.add(seller_b_profile)
+    db_session.commit()
+    db_session.refresh(seller_b)
+
+    token_b = oauth2.create_access_token(data={"user_id": seller_b.id, "sub": str(seller_b.id)})
+    seller_b_headers = {"Authorization": f"Bearer {token_b}"}
+
+    # 4. Seller B tries to delete Seller A's location
+    # Ownership check MUST run before business rule check -> returns 403, NOT 400
+    res_b = await client.delete(f"/locations/{loc_id}", headers=seller_b_headers)
+    assert res_b.status_code == 403
+    assert "Not authorized" in res_b.json()["detail"]
+
+    # 5. Seller A (the actual owner) attempts to delete it -> gets 400 because active service is scheduled
+    res_a = await client.delete(f"/locations/{loc_id}", headers=seller_headers)
+    assert res_a.status_code == 400
+    assert "active events/services" in res_a.json()["detail"]
+
+
+# Test: update_location and delete_location return clean 400 if user has SELLER role but no SellerProfile
+async def test_update_and_delete_location_seller_without_profile_returns_400(
+    client: httpx.AsyncClient,
+    seller_headers: dict[str, str],
+    db_session: Session
+):
+    from datetime import date
+    from app import oauth2, utils
+
+    # Create location with valid seller
+    loc_res = await client.post(
+        "/locations",
+        headers=seller_headers,
+        json={"city": "Quetta", "country": "Pakistan", "address_line": "Chaman Rd"}
+    )
+    assert loc_res.status_code == 201
+    loc_id = loc_res.json()["id"]
+
+    # Create user with SELLER role but NO SellerProfile
+    seller_no_profile = model.User(
+        name="Incomplete Seller",
+        email="incomplete_seller@example.com",
+        password_hash=utils.hash("Password123!"),
+        dob=date(1992, 2, 2),
+        role=model.UserRole.SELLER,
+        phone_no="+1999999902",
+        is_verified=True,
+    )
+    db_session.add(seller_no_profile)
+    db_session.commit()
+    db_session.refresh(seller_no_profile)
+
+    token = oauth2.create_access_token(data={"user_id": seller_no_profile.id, "sub": str(seller_no_profile.id)})
+    incomplete_headers = {"Authorization": f"Bearer {token}"}
+
+    # Attempt PUT
+    put_res = await client.put(
+        f"/locations/{loc_id}",
+        headers=incomplete_headers,
+        json={"city": "Hacked City"}
+    )
+    assert put_res.status_code == 400
+    assert "does not have seller profile" in put_res.json()["detail"]
+
+    # Attempt DELETE
+    del_res = await client.delete(f"/locations/{loc_id}", headers=incomplete_headers)
+    assert del_res.status_code == 400
+    assert "does not have seller profile" in del_res.json()["detail"]
+
+
+# Test: get_locations limit parameter has upper and lower bounds (ge=1, le=100)
+async def test_get_locations_limit_bounds(client: httpx.AsyncClient):
+    # Over maximum limit (100) -> 422 Unprocessable Entity
+    res_high = await client.get("/locations?limit=999999")
+    assert res_high.status_code == 422
+
+    # Under minimum limit (1) -> 422 Unprocessable Entity
+    res_low = await client.get("/locations?limit=0")
+    assert res_low.status_code == 422
+
+    # Valid limit -> 200 OK
+    res_valid = await client.get("/locations?limit=50")
+    assert res_valid.status_code == 200

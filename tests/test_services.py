@@ -348,3 +348,129 @@ async def test_bulk_inventory_duplicate_seat_conflict(
     )
 
     assert res_dup.status_code == 409
+
+
+# 11. Duplicate identifier codes within the same request are caught cleanly (422) instead of hitting 500 IntegrityError
+async def test_bulk_inventory_duplicate_codes_in_request_rejected(
+    client: httpx.AsyncClient,
+    seller_headers: dict[str, str],
+):
+    loc_id = await create_test_location(client, seller_headers)
+    service_res = await client.post(
+        "/services",
+        headers=seller_headers,
+        json={
+            "service_name": "Orchestra Night",
+            "location_id": loc_id,
+            "booking_mode": "unit_assigned",
+            "base_price": 75.00,
+        },
+    )
+    service_id = service_res.json()["id"]
+
+    tier_res = await client.post(
+        f"/services/{service_id}/tiers",
+        headers=seller_headers,
+        json={"name": "Front Row", "price": 75.00},
+    )
+    tier_id = tier_res.json()["id"]
+
+    # Request containing duplicate code within the same payload: ["C-1", "C-2", "C-1"]
+    res_dup_in_req = await client.post(
+        f"/services/{service_id}/inventory/bulk",
+        headers=seller_headers,
+        json={
+            "tier_id": tier_id,
+            "identifier_codes": ["C-1", "C-2", "C-1"],
+        },
+    )
+    assert res_dup_in_req.status_code == 422
+    assert "Duplicate identifier codes" in res_dup_in_req.text
+
+
+# 12. max_capacity is rejected when booking_mode is unit_assigned (prevents dual source of truth)
+async def test_create_service_unit_assigned_rejects_max_capacity(
+    client: httpx.AsyncClient,
+    seller_headers: dict[str, str],
+):
+    loc_id = await create_test_location(client, seller_headers)
+
+    res = await client.post(
+        "/services",
+        headers=seller_headers,
+        json={
+            "service_name": "Conflicting Capacity Event",
+            "location_id": loc_id,
+            "booking_mode": "unit_assigned",
+            "max_capacity": 200,
+            "base_price": 50.00,
+        },
+    )
+    assert res.status_code == 400
+    assert "max_capacity cannot be set for unit_assigned booking mode" in res.json()["detail"]
+
+
+# 13. Cross-seller cannot add tiers or bulk inventory to another seller's service (403)
+async def test_cross_seller_service_modification_forbidden(
+    client: httpx.AsyncClient,
+    seller_headers: dict[str, str],
+    db_session,
+):
+    from datetime import date
+    from app import oauth2, utils
+
+    loc_id = await create_test_location(client, seller_headers)
+    service_res = await client.post(
+        "/services",
+        headers=seller_headers,
+        json={
+            "service_name": "Seller 1 Private Gala",
+            "location_id": loc_id,
+            "booking_mode": "unit_assigned",
+            "base_price": 100.00,
+        },
+    )
+    service_id = service_res.json()["id"]
+
+    # Create Seller 2
+    seller_2 = model.User(
+        name="Second Seller",
+        email="seller2_services@example.com",
+        password_hash=utils.hash("Password123!"),
+        dob=date(1990, 5, 5),
+        role=model.UserRole.SELLER,
+        phone_no="+1888888801",
+        is_verified=True,
+    )
+    db_session.add(seller_2)
+    db_session.commit()
+    db_session.refresh(seller_2)
+
+    profile_2 = model.SellerProfile(
+        user_id=seller_2.id,
+        business_name="Seller 2 Entertainment",
+    )
+    db_session.add(profile_2)
+    db_session.commit()
+    db_session.refresh(seller_2)
+
+    token_2 = oauth2.create_access_token(data={"user_id": seller_2.id, "sub": str(seller_2.id)})
+    seller_2_headers = {"Authorization": f"Bearer {token_2}"}
+
+    # Seller 2 tries to add a tier to Seller 1's service
+    tier_res = await client.post(
+        f"/services/{service_id}/tiers",
+        headers=seller_2_headers,
+        json={"name": "Hacked Tier", "price": 10.00},
+    )
+    assert tier_res.status_code == 403
+    assert "Not authorized" in tier_res.json()["detail"]
+
+    # Seller 2 tries to add bulk inventory to Seller 1's service
+    inv_res = await client.post(
+        f"/services/{service_id}/inventory/bulk",
+        headers=seller_2_headers,
+        json={"tier_id": 1, "identifier_codes": ["H-1"]},
+    )
+    assert inv_res.status_code == 403
+    assert "Not authorized" in inv_res.json()["detail"]
