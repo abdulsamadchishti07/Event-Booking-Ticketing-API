@@ -1,0 +1,139 @@
+from datetime import datetime, timezone, timedelta
+from typing import Annotated
+
+from fastapi import APIRouter, Depends, status, HTTPException
+from sqlalchemy.orm import Session
+
+from app.core import oauth2
+from app.database import get_db, model, schema
+
+
+router = APIRouter(
+    prefix="/bookings",
+    tags=["Bookings & Reservations"]
+)
+
+HOLD_DURATION_MINUTES = 10
+
+@router.post(
+    "",
+    status_code=status.HTTP_201_CREATED,
+    response_model=schema.BookingOut,
+    summary="Create a 10-minute temporary reservation hold"
+)
+def created_booking(
+    booking_in: schema.BookingCreate,
+    curret_user: Annotated[model.User, Depends(oauth2.get_current_user)],
+    db: Session= Depends(get_db)
+):
+    now = datetime.now(timezone.utc)
+
+    # 1
+    # Fetch the service
+    service = db.query(model.Services).filter(model.Services.id == booking_in.service_id).first()
+    if not service:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Service with id {booking_in.service_id} not found"
+        )
+    
+    # 2
+    # Case A: unit_assigned (Reserved Seating with Pessimistic Locking
+    if service.booking_mode == model.BookingMode.UNIT_ASSIGNED:
+        # 2.1
+        if not booking_in.assigned_unit_ids:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="assigned_unit_ids are required for unit_assigned booking mode"
+            )
+        
+        #  PESSIMISTIC LOCK: Lock the exact requested seat rows in PostgreSQL
+        # 2.2
+        seats = db.query(model.InventoryItems).filter(
+            model.InventoryItems.id.in_(booking_in.assigned_unit_ids),
+            model.InventoryItems.service_id == service.id
+        ).with_for_update().all()
+
+        # 2.3
+        # Check if all requested seats exist
+        if len(seats) != len(booking_in.assigned_unit_ids):
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="One or more selected seats were not found for this service"
+            )
+
+        # 2.4
+        # Check if any seats is already taken
+        for seat in seats:
+            if seat.status == model.ItemStatus.AVAILABLE:
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail=f"Seat '{seat.identifier_code}' is currently unavailable (status: {seat.status})"
+                )
+        
+        # 2.5
+        # Change seat status to RESERVED for the 10-minute hold
+        for seat in seats:
+            seat.status == model.ItemStatus.RESERVED
+        
+        # 2.6
+        # Create the booking record
+        new_booking = model.Booking(
+            user_id=curret_user.id,
+            service_id=service.id,
+            tier_id=booking_in.tier_id,
+            quantity=len(seats),
+            start_time=booking_in.start_time,
+            end_time=booking_in.end_time,
+            status=model.BookingStatus.PENDING,
+            expires_at=now + timedelta(minutes=HOLD_DURATION_MINUTES)
+        )
+        new_booking.assigned_units = seats
+        
+        # 2.7
+        db.add(new_booking)
+        db.commit()
+        db.refresh(new_booking)
+        
+        # 2.8
+        return new_booking
+
+    # 3. Case B: slot_capacity (General Admission with Atomic Capacity Lock)
+    elif service.booking_mode == model.BookingMode.SLOT_CAPACITY:
+        # 3.1
+        # PESSIMISTIC LOCK: Lock the service row while checking capacity
+        lock_service= db.query(model.Services).filter(model.Services.id == service.id).with_for_update().first()
+
+        #3.2
+        # Count active tickets (confirmed + pending non-expired holds)
+        active_boking_count = db.query(model.Booking).filter(
+            model.Booking.service_id == service.id,
+            model.Booking.status.in_([model.BookingStatus.CONFIRMED, model.BookingStatus.PENDING])
+        ).count()
+
+        # 3.3
+        if (active_boking_count + booking_in.quantity) > lock_service.max_capacity:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=f"Sold out! Only {max(0, lock_service.max_capacity - active_boking_count)} tickets remaining"
+            )
+
+        # 3.4
+        new_booking = model.Booking(
+            user_id=curret_user.id,
+            service_id=service.id,
+            tier_id=booking_in.tier_id,
+            quantity=booking_in.quantity,
+            start_time=booking_in.start_time,
+            end_time=booking_in.end_time,
+            status=model.BookingStatus.PENDING,
+            expires_at=now + timedelta(minutes=HOLD_DURATION_MINUTES)
+        )
+
+        # 3.5
+        db.add(new_booking)
+        db.commit()
+        db.refresh(new_booking)
+
+        # 3.6
+        return new_booking
