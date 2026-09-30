@@ -133,3 +133,82 @@ async def test_booking_unauthenticated_rejected(client: httpx.AsyncClient):
     }
     res = await client.post("/bookings", json=payload)
     assert res.status_code == 401
+
+async def setup_test_event_slot_capacity(
+    client: httpx.AsyncClient,
+    seller_headers: dict[str, str],
+    max_capacity: int = 5
+):
+    loc_res = await client.post(
+        "/locations",
+        headers=seller_headers,
+        json={"city": "Lahore", "country": "Pakistan", "address_line": "Alhamra"}
+    )
+    assert loc_res.status_code == 201
+    loc_id = loc_res.json()["id"]
+
+    service_res = await client.post(
+        "/services",
+        headers=seller_headers,
+        json={
+            "service_name": "General Admission Concert",
+            "location_id": loc_id,
+            "booking_mode": "slot_capacity",
+            "max_capacity": max_capacity,
+            "base_price": 10.00
+        }
+    )
+    assert service_res.status_code == 201
+    return service_res.json()["id"]
+
+
+# 4. Customer successfully books general admission
+async def test_create_booking_slot_capacity_success(
+    client: httpx.AsyncClient,
+    seller_headers: dict[str, str],
+    user_headers: dict[str, str]
+):
+    service_id = await setup_test_event_slot_capacity(client, seller_headers, max_capacity=10)
+
+    now = datetime.now(timezone.utc)
+    payload = {
+        "service_id": service_id,
+        "quantity": 3,
+        "start_time": (now + timedelta(days=2)).isoformat(),
+        "end_time": (now + timedelta(days=2, hours=3)).isoformat()
+    }
+
+    response = await client.post("/bookings", headers=user_headers, json=payload)
+    assert response.status_code == 201
+    data = response.json()
+
+    assert data["status"] == "pending"
+    assert data["quantity"] == 3
+    assert "created_at" in data
+
+
+# 5. Sold out → 409 Conflict when max_capacity exceeded
+async def test_booking_slot_capacity_sold_out(
+    client: httpx.AsyncClient,
+    seller_headers: dict[str, str],
+    user_headers: dict[str, str]
+):
+    service_id = await setup_test_event_slot_capacity(client, seller_headers, max_capacity=2)
+
+    now = datetime.now(timezone.utc)
+    payload = {
+        "service_id": service_id,
+        "quantity": 2,
+        "start_time": (now + timedelta(days=2)).isoformat(),
+        "end_time": (now + timedelta(days=2, hours=3)).isoformat()
+    }
+
+    # Takes all 2 spots → 201
+    res1 = await client.post("/bookings", headers=user_headers, json=payload)
+    assert res1.status_code == 201
+
+    # Tries 1 more but 0 remain → 409
+    payload["quantity"] = 1
+    res2 = await client.post("/bookings", headers=user_headers, json=payload)
+    assert res2.status_code == 409
+    assert "Sold out" in res2.json()["detail"]
