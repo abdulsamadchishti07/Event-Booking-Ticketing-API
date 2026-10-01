@@ -22,14 +22,14 @@
 
 ## 📊 Sprint Tracker
 
-| Sprint | Title                                           |           Status           | Primary Focus                                                     |
-| :----: | :---------------------------------------------- | :------------------------: | :---------------------------------------------------------------- |
-| **1**  | **Foundations & Relational DB Schema**          |      ✅ **COMPLETED**      | PostgreSQL Schema, ER Diagrams, Alembic Migrations                |
-| **2**  | **Auth, Session Management & Security**         |      ✅ **COMPLETED**      | JWT, Argon2id, Redis Sessions, Rate Limiting, RBAC & Pytest Suite |
-| **3**  | **Event Management & Concurrency-Safe Booking** | 🟡 **TESTING IN PROGRESS** | Event/Seat CRUD, `SELECT FOR UPDATE`, Race condition prevention   |
-| **4**  | **Stripe Payments & Async Webhooks**            |       ⏳ **PENDING**       | PaymentIntents, Webhook signature verification, Invoices, Refunds |
-| **5**  | **Redis Caching & Performance Tuning**          |       ⏳ **PENDING**       | Listing cache, cache invalidation on write, endpoint optimization |
-| **6**  | **Docker, Nginx & Stress Load Testing**         |       ⏳ **PENDING**       | Docker Compose, Nginx reverse proxy, Locust/k6 concurrency tests  |
+| Sprint | Title                                           |      Status      | Primary Focus                                                     |
+| :----: | :---------------------------------------------- | :--------------: | :---------------------------------------------------------------- |
+| **1**  | **Foundations & Relational DB Schema**          | ✅ **COMPLETED** | PostgreSQL Schema, ER Diagrams, Alembic Migrations                |
+| **2**  | **Auth, Session Management & Security**         | ✅ **COMPLETED** | JWT, Argon2id, Redis Sessions, Rate Limiting, RBAC & Pytest Suite |
+| **3**  | **Event Management & Concurrency-Safe Booking** | ✅ **COMPLETED** | Event/Seat CRUD, `SELECT FOR UPDATE`, Race condition prevention   |
+| **4**  | **Stripe Payments & Async Webhooks**            |  ⏳ **PENDING**  | PaymentIntents, Webhook signature verification, Invoices, Refunds |
+| **5**  | **Redis Caching & Performance Tuning**          |  ⏳ **PENDING**  | Listing cache, cache invalidation on write, endpoint optimization |
+| **6**  | **Docker, Nginx & Stress Load Testing**         |  ⏳ **PENDING**  | Docker Compose, Nginx reverse proxy, Locust/k6 concurrency tests  |
 
 ---
 
@@ -292,22 +292,22 @@ To build this systematically without getting trapped in debugging loops, we foll
 - [x] **Milestone 3.1 — Locations CRUD (Test-First)**:
   - Write `tests/test_locations.py` (seller-only creation, public listing, 403 on non-owner edit/delete).
   - Implement `app/routers/locations.py` until all location tests pass green.
-- [_] **Milestone 3.2 — Services, Tiers & Bulk Inventory (Test-First)**:
+- [x] **Milestone 3.2 — Services, Tiers & Bulk Inventory (Test-First)**:
   - Write `tests/test_services.py` (`slot_capacity` vs `unit_assigned` creation, tier pricing, bulk seat generation).
   - Implement `app/routers/services.py` seller management endpoints until all service tests pass green.
-- [ ] **Milestone 3.3 — Concurrency-Safe Booking Core (Build-First)**:
+- [x] **Milestone 3.3 — Concurrency-Safe Booking Core (Build-First)**:
   - Implement `POST /bookings` in `app/routers/bookings.py` using PostgreSQL row-level pessimistic locking (`with_for_update()`).
   - Implement atomic capacity check for `slot_capacity` events.
   - Create 10-minute temporary holds in `pending` status with `reserved` seats.
   - Perform manual 2-request sanity check on state transitions.
-- [ ] **Milestone 3.4 — High-Concurrency Stress Test Suite (Immediate)**:
+- [x] **Milestone 3.4 — High-Concurrency Stress Test Suite (Immediate)**:
   - Write `tests/test_concurrency.py`: Fire 50 simultaneous requests against a single seat using `asyncio.gather` / `ThreadPoolExecutor`.
   - Validate: Exactly 1 request succeeds with `201 Created`; 49 requests receive clean `409 Conflict`. Zero deadlocks, zero double-bookings.
-- [ ] **Milestone 3.5 — Hold Expiration & Automatic Sweeper (Build-First $\rightarrow$ Test)**:
+- [x] **Milestone 3.5 — Hold Expiration & Automatic Sweeper (Build-First $\rightarrow$ Test)**:
   - Implement background hold release sweeper function (`release_expired_holds`).
   - Implement manual release endpoint (`DELETE /bookings/{id}/release`).
   - Write lifecycle test: force-expire pending booking $\rightarrow$ run sweeper $\rightarrow$ assert seats return to `available`.
-- [ ] **Milestone 3.6 — Public Discovery & Real-Time Seat Map**:
+- [x] **Milestone 3.6 — Public Discovery & Real-Time Seat Map**:
   - Implement `GET /services` (filter by city, date, price, capacity).
   - Implement `GET /services/{id}/seats` (live visual status map: `available`, `reserved`, `booked`).
 

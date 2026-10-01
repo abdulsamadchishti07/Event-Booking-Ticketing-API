@@ -260,3 +260,53 @@ async def test_sweeper_cancels_expired_holds(
 
     assert booking_record.status == model.BookingStatus.CANCELLED
     assert seat.status == model.ItemStatus.AVAILABLE
+
+
+async def test_booking_slot_capacity_rejects_assigned_units(
+    client: httpx.AsyncClient,
+    seller_headers: dict[str, str],
+    user_headers: dict[str, str]
+):
+    # Setup a slot_capacity event
+    loc_res = await client.post(
+        "/locations",
+        headers=seller_headers,
+        json={"city": "Islamabad", "country": "Pakistan", "address_line": "F-9 Park"}
+    )
+    loc_id = loc_res.json()["id"]
+
+    svc_res = await client.post(
+        "/services",
+        headers=seller_headers,
+        json={
+            "service_name": "Open Air Festival",
+            "location_id": loc_id,
+            "booking_mode": "slot_capacity",
+            "base_price": 20.00,
+            "max_capacity": 100
+        }
+    )
+    svc_id = svc_res.json()["id"]
+
+    tier_res = await client.post(
+        f"/services/{svc_id}/tiers",
+        headers=seller_headers,
+        json={"name": "General Admission", "price": 20.00}
+    )
+    tier_id = tier_res.json()["id"]
+
+    now = datetime.now(timezone.utc)
+    # Attempt to pass assigned_unit_ids to a slot_capacity event
+    payload = {
+        "service_id": svc_id,
+        "tier_id": tier_id,
+        "quantity": 1,
+        "assigned_unit_ids": [9999],
+        "start_time": (now + timedelta(days=1)).isoformat(),
+        "end_time": (now + timedelta(days=1, hours=2)).isoformat()
+    }
+
+    res = await client.post("/bookings", headers=user_headers, json=payload)
+    assert res.status_code == 400
+    assert "cannot be provided for slot_capacity" in res.json()["detail"]
+

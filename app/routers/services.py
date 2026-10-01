@@ -1,12 +1,12 @@
-from typing import Annotated
+from typing import Annotated, List, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
+from sqlalchemy import asc, desc
 from sqlalchemy.exc import IntegrityError
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, joinedload
 
 from app.core import oauth2
 from app.database import get_db, model, schema
-from typing import List, Optional
 
 
 router = APIRouter(
@@ -253,7 +253,8 @@ def bulk_create_inventory(
 # ==========================================================
 # 4. Public Discovery: Search and Filter Events
 # ==========================================================
-
+# 4. Public Discovery: Search & Filter Events
+# ==========================================================
 @router.get(
     "",
     status_code=status.HTTP_200_OK,
@@ -265,11 +266,23 @@ def search_services(
     city: Optional[str] = None,
     country: Optional[str] = None,
     booking_mode: Optional[model.BookingMode] = None,
-    min_price: Optional[float] = None,
-    max_price: Optional[float] = None,
-    limit: int = 100,
-    offset: int = 0
+    min_price: Optional[float] = Query(None, ge=0),
+    max_price: Optional[float] = Query(None, ge=0),
+    sort_by: Optional[str] = Query(
+        None,
+        pattern="^(price_asc|price_desc)$",
+        description="Sort by: price_asc or price_desc"
+    ),
+    limit: int = Query(default=100, ge=1, le=100, description="Items per page (max 100)"),
+    offset: int = Query(default=0, ge=0, description="Pagination offset")
 ):
+    if min_price is not None and max_price is not None:
+        if min_price > max_price:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="min_price cannot be greater than max_price"
+            )
+
     query = db.query(model.Services).join(model.Location)
 
     if city:
@@ -282,6 +295,13 @@ def search_services(
         query = query.filter(model.Services.base_price >= min_price)
     if max_price is not None:
         query = query.filter(model.Services.base_price <= max_price)
+
+    if sort_by == "price_asc":
+        query = query.order_by(asc(model.Services.base_price))
+    elif sort_by == "price_desc":
+        query = query.order_by(desc(model.Services.base_price))
+    else:
+        query = query.order_by(desc(model.Services.id))
 
     return query.offset(offset).limit(limit).all()
 
@@ -311,8 +331,13 @@ def get_service_seats(
             detail="Seat maps are only available for unit_assigned events"
         )
 
-    seats = db.query(model.InventoryItems).filter(
-        model.InventoryItems.service_id == service_id
-    ).all()
+    seats = (
+        db.query(model.InventoryItems)
+        .options(joinedload(model.InventoryItems.tier))
+        .filter(model.InventoryItems.service_id == service_id)
+        .order_by(model.InventoryItems.id.asc())
+        .all()
+    )
 
     return seats
+

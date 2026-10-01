@@ -220,6 +220,8 @@ class InventoryItemOut(InventoryItemBase):
     id: int
     service_id: int
     tier_id: int
+    tier_name: Optional[str] = None
+    price: Optional[Decimal] = None
 
     model_config = ConfigDict(from_attributes=True)
 

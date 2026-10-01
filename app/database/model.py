@@ -249,6 +249,14 @@ class InventoryItems(Base):
         back_populates="assigned_units",
     )
 
+    @property
+    def tier_name(self) -> Optional[str]:
+        return self.tier.name if self.tier else None
+
+    @property
+    def price(self) -> Optional[Decimal]:
+        return self.tier.price if self.tier else None
+
 
 # ==========================================================
 # ENTITY: Booking
