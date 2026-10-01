@@ -531,7 +531,7 @@ async def test_public_get_live_seat_map(
     client: httpx.AsyncClient,
     seller_headers: dict[str, str]
 ):
-    # Setup: Create a unit_assigned event and generate seats
+    # Setup: Create a unit_assigned event
     loc_id = await create_test_location(client, seller_headers)
     res_svc = await client.post("/services", headers=seller_headers, json={
         "service_name": "Seat Map Test Event",
@@ -541,22 +541,33 @@ async def test_public_get_live_seat_map(
         "base_price": 100.00
     })
     service_id = res_svc.json()["id"]
-    # Generate 5 seats
+
+    # Fix: Create a pricing tier first!
+    res_tier = await client.post(
+        f"/services/{service_id}/tiers",
+        headers=seller_headers,
+        json={"name": "VIP", "price": 150.00}
+    )
+    tier_id = res_tier.json()["id"]
+
+    # Generate 5 seats assigned to that tier
     await client.post(
         f"/services/{service_id}/inventory/bulk",
         headers=seller_headers,
-        json={"identifier_codes": ["A-1", "A-2", "A-3", "A-4", "A-5"]}
+        json={"tier_id": tier_id, "identifier_codes": ["A-1", "A-2", "A-3", "A-4", "A-5"]}
     )
+
     # Fetch the live seat map!
     res_seats = await client.get(f"/services/{service_id}/seats")
     assert res_seats.status_code == 200
     seats = res_seats.json()
+
     assert len(seats) == 5
-    # Ensure it returns the identifier codes and their current status
+    # Ensure it returns the identifier codes, status, and the tier!
     assert seats[0]["identifier_code"] == "A-1"
     assert seats[0]["status"] == "available"
-    # Ensure pricing tier data is available (it should be None since no tier was attached)
-    assert "tier_id" in seats[0]
+    assert seats[0]["tier_id"] == tier_id
+
 
 async def test_public_get_seat_map_slot_capacity_rejected(
     client: httpx.AsyncClient,
@@ -576,4 +587,4 @@ async def test_public_get_seat_map_slot_capacity_rejected(
     # Try to fetch a seat map for a General Admission event (should fail with 400 Bad Request)
     res_seats = await client.get(f"/services/{service_id}/seats")
     assert res_seats.status_code == 400
-    assert "not a unit assigned" in res_seats.json()["detail"].lower()
+    assert "seat maps are only available" in res_seats.json()["detail"].lower()
