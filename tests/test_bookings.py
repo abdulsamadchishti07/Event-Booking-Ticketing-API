@@ -245,7 +245,7 @@ async def test_sweeper_cancels_expired_holds(
     # 2
     # HACK THE MATRIX: Fast forward time! 
     # We manually alter the database to pretend this booking happened 15 minutes ago.
-    booking_record = db_session.query(model.Booking).get(booking_id)
+    booking_record = db_session.get(model.Booking, booking_id)
     booking_record.created_at = now - timedelta(minutes=15)
     db_session.commit()
 
