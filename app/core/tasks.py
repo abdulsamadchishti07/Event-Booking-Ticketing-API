@@ -2,14 +2,16 @@ import asyncio
 from datetime import datetime, timedelta, timezone
 from app.database import SessionLocal, model
 
+from sqlalchemy.orm import Session
 
-def released_expired_holds():
+def released_expired_holds(db: Session = None):
     """
     Finds PENDING bookings older than 10 minutes, cancels them,
     and returns any assigned seats to AVAILABLE status.
     """
 
-    db = SessionLocal()
+    close_session = (db is None)
+    db = db or SessionLocal()
 
     try:
         now = datetime.now(timezone.utc)
@@ -32,6 +34,7 @@ def released_expired_holds():
             db.commit()
         
     finally:
+        if close_session:
             db.close()
         
 async def run_hold_sweeper_loop():

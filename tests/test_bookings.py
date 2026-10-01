@@ -251,7 +251,7 @@ async def test_sweeper_cancels_expired_holds(
 
     # 3
     # Trigger the Sweeper manually
-    released_expired_holds()
+    released_expired_holds(db=db_session)
 
     # 4 
     # Verify the Sweeper did its job
