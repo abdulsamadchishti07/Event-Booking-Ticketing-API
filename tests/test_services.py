@@ -474,3 +474,106 @@ async def test_cross_seller_service_modification_forbidden(
     )
     assert inv_res.status_code == 403
     assert "Not authorized" in inv_res.json()["detail"]
+
+# ==========================================================
+# PUBLIC DISCOVERY & LIVE SEAT MAP TESTS
+# ==========================================================
+
+async def test_public_get_all_services(
+    client: httpx.AsyncClient,
+    seller_headers: dict[str, str]
+):
+    loc_id = await create_test_location(client, seller_headers)
+
+    # Event 1: Tech Conference (slot_capacity, $50)
+    await client.post("/services", headers=seller_headers, json={
+        "service_name": "Tech Conference 2026",
+        "service_desc": "Annual Developers Summit",
+        "location_id": loc_id,
+        "booking_mode": "slot_capacity",
+        "max_capacity": 500,
+        "base_price": 50.00
+    })
+
+    # Event 2: Rock Concert (unit_assigned, $150)
+    await client.post("/services", headers=seller_headers, json={
+        "service_name": "Rock Concert",
+        "service_desc": "Live music event",
+        "location_id": loc_id,
+        "booking_mode": "unit_assigned",
+        "max_capacity": None,
+        "base_price": 150.00
+    })
+
+    # 1. Fetch all services (No authentication needed!)
+    res = await client.get("/services")
+    assert res.status_code == 200
+    data = res.json()
+    assert len(data) >= 2
+
+    # 2. Test Filtering by booking_mode
+    res_filter = await client.get("/services?booking_mode=unit_assigned")
+    assert res_filter.status_code == 200
+    data_filter = res_filter.json()
+    for event in data_filter:
+        assert event["booking_mode"] == "unit_assigned"
+
+    # 3. Test Filtering by Max Price
+    res_price = await client.get("/services?max_price=100")
+    assert res_price.status_code == 200
+    data_price = res_price.json()
+    # Should only return the $50 Tech Conference, not the $150 Rock Concert
+    assert any(e["service_name"] == "Tech Conference 2026" for e in data_price)
+    assert not any(e["service_name"] == "Rock Concert" for e in data_price)
+
+
+async def test_public_get_live_seat_map(
+    client: httpx.AsyncClient,
+    seller_headers: dict[str, str]
+):
+    # Setup: Create a unit_assigned event and generate seats
+    loc_id = await create_test_location(client, seller_headers)
+    res_svc = await client.post("/services", headers=seller_headers, json={
+        "service_name": "Seat Map Test Event",
+        "service_desc": "Checking the visual map",
+        "location_id": loc_id,
+        "booking_mode": "unit_assigned",
+        "base_price": 100.00
+    })
+    service_id = res_svc.json()["id"]
+    # Generate 5 seats
+    await client.post(
+        f"/services/{service_id}/inventory/bulk",
+        headers=seller_headers,
+        json={"identifier_codes": ["A-1", "A-2", "A-3", "A-4", "A-5"]}
+    )
+    # Fetch the live seat map!
+    res_seats = await client.get(f"/services/{service_id}/seats")
+    assert res_seats.status_code == 200
+    seats = res_seats.json()
+    assert len(seats) == 5
+    # Ensure it returns the identifier codes and their current status
+    assert seats[0]["identifier_code"] == "A-1"
+    assert seats[0]["status"] == "available"
+    # Ensure pricing tier data is available (it should be None since no tier was attached)
+    assert "tier_id" in seats[0]
+
+async def test_public_get_seat_map_slot_capacity_rejected(
+    client: httpx.AsyncClient,
+    seller_headers: dict[str, str]
+):
+    # Setup: Create a slot_capacity event (General Admission)
+    loc_id = await create_test_location(client, seller_headers)
+    res_svc = await client.post("/services", headers=seller_headers, json={
+        "service_name": "General Admission Event",
+        "service_desc": "No specific seats",
+        "location_id": loc_id,
+        "booking_mode": "slot_capacity",
+        "max_capacity": 100,
+        "base_price": 50.00
+    })
+    service_id = res_svc.json()["id"]
+    # Try to fetch a seat map for a General Admission event (should fail with 400 Bad Request)
+    res_seats = await client.get(f"/services/{service_id}/seats")
+    assert res_seats.status_code == 400
+    assert "not a unit assigned" in res_seats.json()["detail"].lower()
