@@ -153,6 +153,9 @@ class BookingMode(str, enum.Enum):
 
 class Services(Base):
     __tablename__ = "services"
+    __table_args__ = (
+        CheckConstraint("end_time > start_time", name="services_end_time_after_start_time"),
+    )
 
     id: Mapped[int] = mapped_column(primary_key=True)
     seller_id: Mapped[int] = mapped_column(
@@ -172,6 +175,13 @@ class Services(Base):
     )
     max_capacity: Mapped[Optional[int]]
     base_price: Mapped[Decimal] = mapped_column(Numeric(10, 2))
+
+    start_time: Mapped[datetime] = mapped_column(
+        TIMESTAMP(timezone=True), nullable=False, index=True
+    )
+    end_time: Mapped[datetime] = mapped_column(
+        TIMESTAMP(timezone=True), nullable=False
+    )
 
     seller: Mapped["SellerProfile"] = relationship(back_populates="services")
     location: Mapped["Location"] = relationship(back_populates="services")

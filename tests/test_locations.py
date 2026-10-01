@@ -1,3 +1,4 @@
+from datetime import datetime, timedelta, timezone
 from redis import client
 from fastapi import responses
 import httpx
@@ -233,7 +234,7 @@ async def test_delete_location_ownership_check_runs_before_business_rule(
     assert loc_res.status_code == 201
     loc_id = loc_res.json()["id"]
 
-    # 2. Attach a service to this location
+    now = datetime.now(timezone.utc)
     service_res = await client.post(
         "/services",
         headers=seller_headers,
@@ -242,7 +243,9 @@ async def test_delete_location_ownership_check_runs_before_business_rule(
             "location_id": loc_id,
             "booking_mode": "slot_capacity",
             "max_capacity": 500,
-            "base_price": 20.00
+            "base_price": 20.00,
+            "start_time": (now + timedelta(days=1)).isoformat(),
+            "end_time": (now + timedelta(days=1, hours=4)).isoformat()
         }
     )
     assert service_res.status_code == 201

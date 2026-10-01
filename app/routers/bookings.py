@@ -76,8 +76,8 @@ def create_booking(
             service_id=service.id,
             tier_id=booking_in.tier_id,
             quantity=len(seats),
-            start_time=booking_in.start_time,
-            end_time=booking_in.end_time,
+            start_time=service.start_time,
+            end_time=service.end_time,
             status=model.BookingStatus.PENDING,
         )
         new_booking.assigned_units = seats
@@ -116,8 +116,8 @@ def create_booking(
             service_id=service.id,
             tier_id=booking_in.tier_id,
             quantity=booking_in.quantity,
-            start_time=booking_in.start_time,
-            end_time=booking_in.end_time,
+            start_time=service.start_time,
+            end_time=service.end_time,
             status=model.BookingStatus.PENDING,
         )
 

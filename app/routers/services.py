@@ -1,3 +1,4 @@
+from datetime import datetime, timezone
 from typing import Annotated, List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
@@ -67,7 +68,9 @@ def create_services(
         service_desc=services_in.service_desc,
         booking_mode=services_in.booking_mode,
         max_capacity=services_in.max_capacity,
-        base_price=services_in.base_price
+        base_price=services_in.base_price,
+        start_time=services_in.start_time,
+        end_time=services_in.end_time,
     )
 
     try:
@@ -268,10 +271,13 @@ def search_services(
     booking_mode: Optional[model.BookingMode] = None,
     min_price: Optional[float] = Query(None, ge=0),
     max_price: Optional[float] = Query(None, ge=0),
+    date_from: Optional[datetime] = Query(None, description="Filter events starting on or after this UTC timestamp"),
+    date_to: Optional[datetime] = Query(None, description="Filter events starting on or before this UTC timestamp"),
+    include_past: bool = Query(default=False, description="Whether to include past events (default False)"),
     sort_by: Optional[str] = Query(
         None,
-        pattern="^(price_asc|price_desc)$",
-        description="Sort by: price_asc or price_desc"
+        pattern="^(price_asc|price_desc|date_asc|date_desc)$",
+        description="Sort by: price_asc, price_desc, date_asc, or date_desc"
     ),
     limit: int = Query(default=100, ge=1, le=100, description="Items per page (max 100)"),
     offset: int = Query(default=0, ge=0, description="Pagination offset")
@@ -281,6 +287,13 @@ def search_services(
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="min_price cannot be greater than max_price"
+            )
+
+    if date_from is not None and date_to is not None:
+        if date_from > date_to:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="date_from cannot be greater than date_to"
             )
 
     query = db.query(model.Services).join(model.Location)
@@ -296,12 +309,27 @@ def search_services(
     if max_price is not None:
         query = query.filter(model.Services.base_price <= max_price)
 
-    if sort_by == "price_asc":
+    # Date Filtering: Default to upcoming events only (start_time >= now()) unless include_past=True
+    now = datetime.now(timezone.utc)
+    if date_from:
+        query = query.filter(model.Services.start_time >= date_from)
+    elif not include_past:
+        query = query.filter(model.Services.start_time >= now)
+
+    if date_to:
+        query = query.filter(model.Services.start_time <= date_to)
+
+    # Sorting
+    if sort_by == "date_asc":
+        query = query.order_by(asc(model.Services.start_time))
+    elif sort_by == "date_desc":
+        query = query.order_by(desc(model.Services.start_time))
+    elif sort_by == "price_asc":
         query = query.order_by(asc(model.Services.base_price))
     elif sort_by == "price_desc":
         query = query.order_by(desc(model.Services.base_price))
     else:
-        query = query.order_by(desc(model.Services.id))
+        query = query.order_by(asc(model.Services.start_time))
 
     return query.offset(offset).limit(limit).all()
 

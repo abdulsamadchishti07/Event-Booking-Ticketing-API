@@ -2,7 +2,7 @@ from datetime import date, datetime
 from decimal import Decimal
 from typing import List, Optional
 
-from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator
+from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator, model_validator
 
 from ..database.model import (
     BookingMode,
@@ -172,6 +172,14 @@ class ServiceBase(BaseModel):
     booking_mode: BookingMode = BookingMode.SLOT_CAPACITY
     max_capacity: Optional[int] = Field(None, ge=1)
     base_price: Decimal = Field(..., ge=0, decimal_places=2)
+    start_time: datetime
+    end_time: datetime
+
+    @model_validator(mode="after")
+    def validate_time_range(self) -> "ServiceBase":
+        if self.end_time <= self.start_time:
+            raise ValueError("end_time must be strictly after start_time")
+        return self
 
 
 class ServiceCreate(ServiceBase):
@@ -186,6 +194,15 @@ class ServiceUpdate(BaseModel):
     booking_mode: Optional[BookingMode] = None
     max_capacity: Optional[int] = Field(None, ge=1)
     base_price: Optional[Decimal] = Field(None, ge=0, decimal_places=2)
+    start_time: Optional[datetime] = None
+    end_time: Optional[datetime] = None
+
+    @model_validator(mode="after")
+    def validate_time_range(self) -> "ServiceUpdate":
+        if self.start_time and self.end_time:
+            if self.end_time <= self.start_time:
+                raise ValueError("end_time must be strictly after start_time")
+        return self
 
 
 class ServiceOut(ServiceBase):
@@ -250,8 +267,6 @@ class BookingBase(BaseModel):
     service_id: int
     tier_id: Optional[int] = None
     quantity: int = Field(default=1, ge=1)
-    start_time: datetime
-    end_time: datetime
 
 
 class BookingCreate(BookingBase):
@@ -268,6 +283,8 @@ class BookingStatusUpdate(BaseModel):
 class BookingOut(BookingBase):
     id: int
     user_id: int
+    start_time: datetime
+    end_time: datetime
     status: BookingStatus
     created_at: datetime
     assigned_units: List[InventoryItemOut] = []

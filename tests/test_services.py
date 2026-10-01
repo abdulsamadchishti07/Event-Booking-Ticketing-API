@@ -1,7 +1,15 @@
+from datetime import datetime, timedelta, timezone
 import httpx
 import pytest
 
 from app.database import model
+
+def make_test_time_window(days_ahead=7, duration_hours=4):
+    now = datetime.now(timezone.utc)
+    return {
+        "start_time": (now + timedelta(days=days_ahead)).isoformat(),
+        "end_time": (now + timedelta(days=days_ahead, hours=duration_hours)).isoformat()
+    }
 
 
 
@@ -35,7 +43,8 @@ async def test_create_service_slot_capacity(
         "location_id": location_id,
         "booking_mode": "slot_capacity",
         "max_capacity": 500,
-        "base_price": 50.00
+        "base_price": 50.00,
+        **make_test_time_window()
     }
 
     responses = await client.post("/services", headers=seller_headers, json=payload) 
@@ -62,7 +71,8 @@ async def test_create_service_unit_assigned(
         "service_desc": "Ticket of Movie The new so called avengergs getting betting by Dr.Victor Doom",
         "location_id": location_id,
         "booking_mode": "unit_assigned",
-        "base_price": 100.00
+        "base_price": 100.00,
+        **make_test_time_window()
     }
 
     response = await client.post(
@@ -88,7 +98,8 @@ async def test_create_service_customer_forbiden(
         "service_name": "Unauthorized Event",
         "location_id": location_id,
         "booking_mode": "slot_capacity",
-        "base_price": 10.00
+        "base_price": 10.00,
+        **make_test_time_window()
     }
     responses = await client.post(
         "/services",
@@ -107,7 +118,8 @@ async def test_create_service_invalid_location(
         "service_name": "Unauthorized Event",
         "location_id": 99999,
         "booking_mode": "slot_capacity",
-        "base_price": 10.00
+        "base_price": 10.00,
+        **make_test_time_window()
     }
 
     responses = await client.post(
@@ -131,7 +143,8 @@ async def test_create_service_tier_success(
             "location_id": loc_id,
             "booking_mode": "slot_capacity",
             "max_capacity": 1000,
-            "base_price": 40.00
+            "base_price": 40.00,
+        **make_test_time_window()
         }
     )
     service_id = service_res.json()["id"]
@@ -169,7 +182,8 @@ async def test_create_duplicate_tier_conflict(
             "location_id": loc_id,
             "booking_mode": "slot_capacity",
             "max_capacity": 200,
-            "base_price": 20.00
+            "base_price": 20.00,
+        **make_test_time_window()
         }
     )
     service_id = service_res.json()["id"]
@@ -205,7 +219,8 @@ async def test_create_tier_customer_forbidden(
             "location_id": loc_id,
             "booking_mode": "slot_capacity",
             "max_capacity": 300,
-            "base_price": 15.00
+            "base_price": 15.00,
+        **make_test_time_window()
         }
     )
     service_id = service_res.json()["id"]
@@ -231,7 +246,8 @@ async def test_bulk_inventory_generator_success(
             "service_name": "Cinema Premier",
             "location_id": loc_id,
             "booking_mode": "unit_assigned",
-            "base_price": 15.00
+            "base_price": 15.00,
+        **make_test_time_window()
         }
     )
 
@@ -275,7 +291,8 @@ async def test_bulk_inventory_slot_capacity_rejected(
             "location_id": loc_id,
             "booking_mode": "slot_capacity",
             "max_capacity": 500,
-            "base_price": 25.00
+            "base_price": 25.00,
+        **make_test_time_window()
         }
     )
 
@@ -310,6 +327,7 @@ async def test_bulk_inventory_duplicate_seat_conflict(
             "location_id": loc_id,
             "booking_mode": "unit_assigned",
             "base_price": 50.00,
+        **make_test_time_window(),
         },
     )
     assert service_res.status_code == 201
@@ -364,6 +382,7 @@ async def test_bulk_inventory_duplicate_codes_in_request_rejected(
             "location_id": loc_id,
             "booking_mode": "unit_assigned",
             "base_price": 75.00,
+        **make_test_time_window(),
         },
     )
     service_id = service_res.json()["id"]
@@ -404,6 +423,7 @@ async def test_create_service_unit_assigned_rejects_max_capacity(
             "booking_mode": "unit_assigned",
             "max_capacity": 200,
             "base_price": 50.00,
+        **make_test_time_window(),
         },
     )
     assert res.status_code == 400
@@ -428,6 +448,7 @@ async def test_cross_seller_service_modification_forbidden(
             "location_id": loc_id,
             "booking_mode": "unit_assigned",
             "base_price": 100.00,
+        **make_test_time_window(),
         },
     )
     service_id = service_res.json()["id"]
@@ -492,7 +513,8 @@ async def test_public_get_all_services(
         "location_id": loc_id,
         "booking_mode": "slot_capacity",
         "max_capacity": 500,
-        "base_price": 50.00
+        "base_price": 50.00,
+        **make_test_time_window()
     })
 
     # Event 2: Rock Concert (unit_assigned, $150)
@@ -502,7 +524,8 @@ async def test_public_get_all_services(
         "location_id": loc_id,
         "booking_mode": "unit_assigned",
         "max_capacity": None,
-        "base_price": 150.00
+        "base_price": 150.00,
+        **make_test_time_window()
     })
 
     # 1. Fetch all services (No authentication needed!)
@@ -538,7 +561,8 @@ async def test_public_get_live_seat_map(
         "service_desc": "Checking the visual map",
         "location_id": loc_id,
         "booking_mode": "unit_assigned",
-        "base_price": 100.00
+        "base_price": 100.00,
+        **make_test_time_window()
     })
     service_id = res_svc.json()["id"]
 
@@ -581,10 +605,95 @@ async def test_public_get_seat_map_slot_capacity_rejected(
         "location_id": loc_id,
         "booking_mode": "slot_capacity",
         "max_capacity": 100,
-        "base_price": 50.00
+        "base_price": 50.00,
+        **make_test_time_window()
     })
     service_id = res_svc.json()["id"]
     # Try to fetch a seat map for a General Admission event (should fail with 400 Bad Request)
     res_seats = await client.get(f"/services/{service_id}/seats")
     assert res_seats.status_code == 400
     assert "seat maps are only available" in res_seats.json()["detail"].lower()
+
+
+# 17. Creating service with end_time <= start_time is rejected (422)
+async def test_create_service_invalid_time_range_rejected(
+    client: httpx.AsyncClient,
+    seller_headers: dict[str, str]
+):
+    loc_id = await create_test_location(client, seller_headers)
+    now = datetime.now(timezone.utc)
+    res = await client.post(
+        "/services",
+        headers=seller_headers,
+        json={
+            "service_name": "Backwards Time Travel Event",
+            "location_id": loc_id,
+            "booking_mode": "slot_capacity",
+            "max_capacity": 100,
+            "base_price": 50.00,
+            "start_time": (now + timedelta(days=5)).isoformat(),
+            "end_time": (now + timedelta(days=4)).isoformat()  # End before start!
+        }
+    )
+    assert res.status_code == 422
+    assert "end_time must be strictly after start_time" in res.text
+
+
+# 18. Public service discovery date filtering and date sorting
+async def test_public_get_services_date_filtering_and_sorting(
+    client: httpx.AsyncClient,
+    seller_headers: dict[str, str]
+):
+    loc_id = await create_test_location(client, seller_headers)
+    now = datetime.now(timezone.utc)
+
+    # Event in 2 days
+    await client.post(
+        "/services",
+        headers=seller_headers,
+        json={
+            "service_name": "Near Future Event",
+            "location_id": loc_id,
+            "booking_mode": "slot_capacity",
+            "max_capacity": 100,
+            "base_price": 30.00,
+            "start_time": (now + timedelta(days=2)).isoformat(),
+            "end_time": (now + timedelta(days=2, hours=3)).isoformat()
+        }
+    )
+
+    # Event in 10 days
+    await client.post(
+        "/services",
+        headers=seller_headers,
+        json={
+            "service_name": "Far Future Event",
+            "location_id": loc_id,
+            "booking_mode": "slot_capacity",
+            "max_capacity": 100,
+            "base_price": 70.00,
+            "start_time": (now + timedelta(days=10)).isoformat(),
+            "end_time": (now + timedelta(days=10, hours=3)).isoformat()
+        }
+    )
+
+    # 1. Filter by date_to = now + 5 days (should return Near Future Event, not Far Future Event)
+    res_date = await client.get("/services", params={"date_to": (now + timedelta(days=5)).isoformat()})
+    assert res_date.status_code == 200
+    names = [e["service_name"] for e in res_date.json()]
+    assert "Near Future Event" in names
+    assert "Far Future Event" not in names
+
+    # 2. Sort by date_asc
+    res_asc = await client.get("/services?sort_by=date_asc")
+    assert res_asc.status_code == 200
+    events_asc = res_asc.json()
+    start_times = [e["start_time"] for e in events_asc]
+    assert start_times == sorted(start_times)
+
+    # 3. Sort by date_desc
+    res_desc = await client.get("/services?sort_by=date_desc")
+    assert res_desc.status_code == 200
+    events_desc = res_desc.json()
+    start_times_desc = [e["start_time"] for e in events_desc]
+    assert start_times_desc == sorted(start_times_desc, reverse=True)

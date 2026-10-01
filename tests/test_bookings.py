@@ -20,6 +20,7 @@ async def setup_test_event_with_seats(
     loc_id = loc_res.json()["id"]
     
     # 2. Service
+    now = datetime.now(timezone.utc)
     service_res = await client.post(
         "/services",
         headers=seller_headers,
@@ -27,7 +28,9 @@ async def setup_test_event_with_seats(
             "service_name": "Standup Comedy Special",
             "location_id": loc_id,
             "booking_mode": "unit_assigned",
-            "base_price": 25.00   
+            "base_price": 25.00,
+            "start_time": (now + timedelta(days=1)).isoformat(),
+            "end_time": (now + timedelta(days=1, hours=3)).isoformat()
         }
     )
     assert service_res.status_code == 201
@@ -148,6 +151,7 @@ async def setup_test_event_slot_capacity(
     assert loc_res.status_code == 201
     loc_id = loc_res.json()["id"]
 
+    now = datetime.now(timezone.utc)
     service_res = await client.post(
         "/services",
         headers=seller_headers,
@@ -156,7 +160,9 @@ async def setup_test_event_slot_capacity(
             "location_id": loc_id,
             "booking_mode": "slot_capacity",
             "max_capacity": max_capacity,
-            "base_price": 10.00
+            "base_price": 10.00,
+            "start_time": (now + timedelta(days=2)).isoformat(),
+            "end_time": (now + timedelta(days=2, hours=3)).isoformat()
         }
     )
     assert service_res.status_code == 201
@@ -275,6 +281,7 @@ async def test_booking_slot_capacity_rejects_assigned_units(
     )
     loc_id = loc_res.json()["id"]
 
+    now = datetime.now(timezone.utc)
     svc_res = await client.post(
         "/services",
         headers=seller_headers,
@@ -283,7 +290,9 @@ async def test_booking_slot_capacity_rejects_assigned_units(
             "location_id": loc_id,
             "booking_mode": "slot_capacity",
             "base_price": 20.00,
-            "max_capacity": 100
+            "max_capacity": 100,
+            "start_time": (now + timedelta(days=3)).isoformat(),
+            "end_time": (now + timedelta(days=3, hours=4)).isoformat()
         }
     )
     svc_id = svc_res.json()["id"]

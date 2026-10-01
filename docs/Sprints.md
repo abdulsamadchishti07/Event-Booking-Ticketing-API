@@ -337,6 +337,21 @@ To build this systematically without getting trapped in debugging loops, we foll
 
 ---
 
+### 🏛️ Key Architectural Decision: Event Dates Live on Services, Not Bookings
+
+> **The Problem**: Sprint 1's schema modeled Services the way a generic appointment system (Calendly, Airbnb) would — the service itself is evergreen ("1-Hour Massage"), and the customer picks the time when booking. So `start_time`/`end_time` were placed on `Booking`.
+>
+> That's wrong for a ticketing platform. An event (a concert, a match) has a fixed date set by the seller, not the customer. Keeping the date on `Booking` caused three real problems:
+> 1. **Blind discovery** — `search_services` had no date to filter or sort on, so "show me events this weekend" was impossible to answer.
+> 2. **Zombie events** — with no event-level end date, a concert that happened two weeks ago stayed listed and bookable forever.
+> 3. **Backwards booking flow** — the customer had to supply `start_time`/`end_time` in the `POST /bookings` payload, meaning they were effectively telling the concert when to happen. For a fixed-date event, that's nonsensical — the date belongs to the event, not the purchase.
+>
+> **The Fix**: Moved `start_time`/`end_time` onto `Services` (migrated via Alembic `c4c9a1d062db`, indexed for range scans, with a `CheckConstraint` ensuring `end_time > start_time`). `search_services` filters out past events by default and supports `date_from`/`date_to`. `POST /bookings` no longer accepts dates from the client — the backend copies `service.start_time`/`end_time` onto the new `Booking` record automatically.
+>
+> **Scope Note**: This design assumes one `Services` row = one fixed date/time occurrence. Multiple showtimes for the same event (a movie's 2pm and 8pm screenings) would require a separate `Showtime` entity — explicitly out of scope for now, not an oversight.
+
+---
+
 ### Sprint 4: Stripe Payment Integration & Webhooks
 
 **Status**: ⏳ **UPNEXT**
