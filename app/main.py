@@ -1,7 +1,21 @@
+import asyncio
+from contextlib import asynccontextmanager
 from fastapi import FastAPI
 
 from .routers import locations, services, bookings
 from .routers.auth import auth, users
+from .tasks import run_hold_sweeper_loop
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Start the background sweeper when the server boots
+    sweeper_task = asyncio.create_task(run_hold_sweeper_loop())
+    yield
+    # Cleanly cancel it when the server shuts down
+    sweeper_task.cancel()
+
+
 
 app = FastAPI(
     title="Event Booking & Ticketing API",
