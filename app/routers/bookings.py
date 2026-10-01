@@ -6,6 +6,7 @@ from sqlalchemy.orm import Session
 
 from app.core import oauth2
 from app.database import get_db, model, schema
+from sqlalchemy import func
 
 
 router = APIRouter(
@@ -106,10 +107,10 @@ def created_booking(
 
         #3.2
         # Count active tickets (confirmed + pending non-expired holds)
-        active_boking_count = db.query(model.Booking).filter(
+        active_boking_count = db.query(func.coalesce(func.sum(model.Booking.quantity), 0)).filter(
             model.Booking.service_id == service.id,
             model.Booking.status.in_([model.BookingStatus.CONFIRMED, model.BookingStatus.PENDING])
-        ).count()
+        ).scalar()
 
         # 3.3
         if (active_boking_count + booking_in.quantity) > lock_service.max_capacity:
@@ -127,7 +128,6 @@ def created_booking(
             start_time=booking_in.start_time,
             end_time=booking_in.end_time,
             status=model.BookingStatus.PENDING,
-            expires_at=now + timedelta(minutes=HOLD_DURATION_MINUTES)
         )
 
         # 3.5

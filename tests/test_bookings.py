@@ -134,6 +134,7 @@ async def test_booking_unauthenticated_rejected(client: httpx.AsyncClient):
     res = await client.post("/bookings", json=payload)
     assert res.status_code == 401
 
+
 async def setup_test_event_slot_capacity(
     client: httpx.AsyncClient,
     seller_headers: dict[str, str],
