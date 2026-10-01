@@ -6,6 +6,7 @@ from sqlalchemy.orm import Session
 
 from app.core import oauth2
 from app.database import get_db, model, schema
+from typing import List, Optional
 
 
 router = APIRouter(
@@ -249,3 +250,69 @@ def bulk_create_inventory(
         "message": f"Successfully created {len(new_items)} inventory items",
         "created_count": len(new_items)
     }
+# ==========================================================
+# 4. Public Discovery: Search and Filter Events
+# ==========================================================
+
+@router.get(
+    "",
+    status_code=status.HTTP_200_OK,
+    response_model=List[schema.ServiceOut],
+    summary="Public discovery of events"
+)
+def search_services(
+    db: Session = Depends(get_db),
+    city: Optional[str] = None,
+    country: Optional[str] = None,
+    booking_mode: Optional[model.BookingMode] = None,
+    min_price: Optional[float] = None,
+    max_price: Optional[float] = None,
+    limit: int = 100,
+    offset: int = 0
+):
+    query = db.query(model.Services).join(model.Location)
+
+    if city:
+        query = query.filter(model.Location.city.ilike(f"%{city}%"))
+    if country:
+        query = query.filter(model.Location.country.ilike(f"%{country}%"))
+    if booking_mode:
+        query = query.filter(model.Services.booking_mode == booking_mode)
+    if min_price is not None:
+        query = query.filter(model.Services.base_price >= min_price)
+    if max_price is not None:
+        query = query.filter(model.Services.base_price <= max_price)
+
+    return query.offset(offset).limit(limit).all()
+
+# ==========================================================
+# 5. Public Discovery: Live Seat Map
+# ==========================================================
+@router.get(
+    "/{service_id}/seats",
+    status_code=status.HTTP_200_OK,
+    response_model=List[schema.InventoryItemOut],
+    summary="Get live seat map for an event"
+)
+def get_service_seats(
+    service_id: int,
+    db: Session = Depends(get_db)
+):
+    service = db.query(model.Services).filter(model.Services.id == service_id).first()
+    if not service:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Service with id {service_id} not found"
+        )
+    
+    if service.booking_mode != model.BookingMode.UNIT_ASSIGNED:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Seat maps are only available for unit_assigned events"
+        )
+
+    seats = db.query(model.InventoryItems).filter(
+        model.InventoryItems.service_id == service_id
+    ).all()
+
+    return seats
