@@ -27,7 +27,7 @@
 | **1**  | **Foundations & Relational DB Schema**          | ✅ **COMPLETED** | PostgreSQL Schema, ER Diagrams, Alembic Migrations                |
 | **2**  | **Auth, Session Management & Security**         | ✅ **COMPLETED** | JWT, Argon2id, Redis Sessions, Rate Limiting, RBAC & Pytest Suite |
 | **3**  | **Event Management & Concurrency-Safe Booking** | ✅ **COMPLETED** | Event/Seat CRUD, `SELECT FOR UPDATE`, Race condition prevention   |
-| **4**  | **Stripe Payments & Async Webhooks**            |  ⏳ **PENDING**  | PaymentIntents, Webhook signature verification, Invoices, Refunds |
+| **4**  | **Stripe Payments & Async Webhooks**            | 🟡 **IN PROGRESS** | PaymentIntents, Webhook signature verification, Invoices, Refunds |
 | **5**  | **Redis Caching & Performance Tuning**          |  ⏳ **PENDING**  | Listing cache, cache invalidation on write, endpoint optimization |
 | **6**  | **Docker, Nginx & Stress Load Testing**         |  ⏳ **PENDING**  | Docker Compose, Nginx reverse proxy, Locust/k6 concurrency tests  |
 
@@ -149,7 +149,7 @@
 
 ### Sprint 3: Core Booking Logic & Concurrency Control
 
-**Status**: ⏳ **IN PROGRESS (The Technical Core)**
+**Status**: ✅ **COMPLETED**
 
 #### 🎯 The Core Engineering Challenge:
 
@@ -201,7 +201,7 @@ In this sprint, we build the core business logic of the platform:
 
 ---
 
-#### 📦 What Will Be Built:
+#### What is implemented:
 
 ##### 1. Venue & Location Management (`app/routers/locations.py`)
 
@@ -313,17 +313,27 @@ To build this systematically without getting trapped in debugging loops, we foll
 
 ---
 
-#### 🧪 Automated Concurrency & Booking Test Plan (Pytest):
+#### Automated Test Suite Plan (Pytest) — 88 Tests Passing:
 
-- **Concurrency Double-Booking Test (`tests/test_concurrency.py`)**:
-  - Use `asyncio.gather` or `concurrent.futures.ThreadPoolExecutor` to send 50 simultaneous booking requests for Seat #1.
-  - **Assertion**: Exactly 1 request receives `201 Created`; the remaining 49 receive `409 Conflict`.
-  - **Assertion**: Database contains exactly 1 booking record and Seat #1 status is `reserved`.
-- **Hold Expiration Test (`tests/test_booking_lifecycle.py`)**:
+- [x] **Concurrency Double-Booking Stress Test (`tests/test_concurrency.py`)**:
+  - Sent 50 simultaneous booking requests for Seat #1 using `asyncio.gather`.
+  - **Assertion Verified**: Exactly 1 request receives `201 Created`; the remaining 49 receive `409 Conflict`.
+  - **Assertion Verified**: Database contains exactly 1 booking record and Seat #1 status is `reserved`. Zero deadlocks, zero double-bookings.
+- [x] **Hold Expiration & Automatic Sweeper Test (`tests/test_booking_lifecycle.py`)**:
   - Reserve seat $\rightarrow$ manually expire timestamp $\rightarrow$ run sweeper $\rightarrow$ assert seat returns to `available` and can be booked by another user.
-- **Role Enforcement Test**:
-  - Verify regular customers cannot create events or locations (`403 Forbidden`).
-  - Verify sellers can only edit/delete their own events.
+- [x] **Locations CRUD & Ownership Tests (`tests/test_locations.py`)**:
+  - Seller-only creation, public listing, 403 on non-owner edit/delete.
+- [x] **Services, Tiers & Inventory Tests (`tests/test_services.py`)**:
+  - `slot_capacity` vs `unit_assigned` creation, tier pricing, bulk seat generation.
+  - Date filtering (`date_from`, `date_to`), price range filtering (`min_price`, `max_price`), sorting, and bounded pagination (`limit <= 100`).
+- [x] **Booking Engine & Permissions Tests (`tests/test_bookings.py`)**:
+  - Booking creation with automated date stamping from `Services`.
+  - Slot capacity atomic decrements and unit-assigned seat reservations.
+  - Role enforcement: Customers cannot create events or locations (`403 Forbidden`); sellers cannot modify other sellers' events.
+- [x] **End-to-End Postman Collection & Multi-User Live Verification**:
+  - Generated and exported collection in `postman/Event_Booking_Ticketing_API.postman_collection.json`.
+  - Tested live against local server with 3 distinct accounts (1 Seller + 2 Customers).
+  - Validated live concurrency race condition: Customer 1 books seat (`201 Created`), Customer 2 attempts same seat (`409 Conflict`).
 
 ---
 
@@ -354,29 +364,162 @@ To build this systematically without getting trapped in debugging loops, we foll
 
 ### Sprint 4: Stripe Payment Integration & Webhooks
 
-**Status**: ⏳ **UPNEXT**
+**Status**: 🟡 **IN PROGRESS (Financial Settlement Engine)**
 
-#### The Challenge:
+#### 🎯 The Core Financial Engineering Challenge:
 
-Handling asynchronous financial transactions securely. You cannot trust the frontend to say "payment succeeded"; you must rely on server-to-server **Stripe Webhooks** with cryptographic signature verification.
+In Sprint 3, a customer successfully holds a seat or capacity slot for 10 minutes (`Booking.status = "pending"`, `InventoryItems.status = "reserved"`). 
+However, **a temporary hold is not a sale**. The core challenge of Sprint 4 is transitioning reservations from temporary holds into irreversible financial and logistical commitments:
 
-#### What You Will Build:
+1. **Zero-Trust Client Boundary**: The frontend cannot be trusted with monetary amounts or payment confirmations. If a client sends `"amount": 5.00` or claims `"payment succeeded"`, the server must reject it. The backend alone computes the charge, registers the intent with Stripe, and waits for a signed, server-to-server webhook.
+2. **Network Failures & Duplicate Charges (Idempotency)**: If a customer double-clicks "Pay" or their mobile connection drops mid-flight, retried requests must never double-charge their card. We enforce this using unique **Stripe Idempotency Keys**.
+3. **Cryptographic Webhook Verification**: Webhook endpoints are open to the public internet. Anyone could POST fake JSON claiming a payment succeeded. We must read the raw unparsed request payload and verify Stripe's HMAC-SHA256 signature (`stripe-signature`) against `STRIPE_WEBHOOK_SECRET`.
+4. **Asynchronous Settlement State Machine**: The client-side checkout experience is decoupled from backend settlement. The backend must cleanly handle:
+   - Success (`payment_intent.succeeded` ➔ `confirmed` + `booked` + `Invoice`).
+   - Failure (`payment_intent.payment_failed` ➔ `cancelled` + seats `available`).
+   - Webhook retries (handling duplicate webhook deliveries idempotently).
 
-1. **Stripe PaymentIntent Creation (`POST /bookings/{id}/pay`)**:
-   - Calculate amount on the server (never accept price from frontend!).
-   - Create Stripe `PaymentIntent` with an **Idempotency Key** to avoid duplicate charges on retries.
-   - Return `client_secret` to the client for Stripe checkout.
-2. **Stripe Webhook Handler (`POST /webhook/stripe`)**:
-   - Read raw request body and verify the `stripe-signature` header using `STRIPE_WEBHOOK_SECRET`.
-   - Event `payment_intent.succeeded`:
-     - Transition booking from `pending` ➔ `confirmed`.
-     - Update seats from `reserved` ➔ `booked`.
-     - Automatically generate an `Invoice` record.
-   - Event `payment_intent.payment_failed`:
-     - Transition booking to `cancelled`.
-     - Release reserved seats back to `available`.
-3. **Cancellations & Refunds (`POST /bookings/{id}/cancel`)**:
-   - Process full or partial refunds via Stripe Refunds API according to cancellation policy.
+---
+
+#### 🏗️ Architecture & Detailed System Workflow:
+
+```
+[Customer with 10-Minute Hold]
+             │
+             ▼
+[POST /bookings/{id}/pay] 
+             │
+             ├── 1. Validate active hold: (created_at + 10m > now()) & status == 'pending'
+             ├── 2. Calculate exact total on backend: (quantity * tier.price)
+             ├── 3. Generate unique Idempotency Key (UUID)
+             ├── 4. Call Stripe API: stripe.PaymentIntent.create()
+             ├── 5. Insert 'payments' row (status='pending', idempotency_key=...)
+             └── 6. Return `client_secret` to client for Stripe Elements checkout
+                           │
+                           ▼
+             [Customer Completes Payment on Stripe]
+                           │
+                           ▼ (Asynchronous Server-to-Server Webhook)
+             [POST /webhook/stripe]
+                           │
+                           ├── 1. Read raw request bytes (request.body())
+                           ├── 2. Verify HMAC signature via `stripe.Webhook.construct_event`
+                           │      (If signature invalid ➔ 400 Bad Request)
+                           │
+                           ├── Event: payment_intent.succeeded
+                           │     ├── Transition Payment: 'pending' ➔ 'succeeded'
+                           │     ├── Transition Booking: 'pending' ➔ 'confirmed'
+                           │     ├── Transition Seats:   'reserved' ➔ 'booked'
+                           │     └── Auto-generate immutable `invoices` record
+                           │
+                           └── Event: payment_intent.payment_failed
+                                 ├── Transition Payment: 'pending' ➔ 'failed'
+                                 ├── Transition Booking: 'pending' ➔ 'cancelled'
+                                 └── Release Seats:      'reserved' ➔ 'available'
+```
+
+---
+
+#### 📦 What Will Be Built:
+
+##### 1. Stripe SDK Setup & Secret Management (`app/config.py` & `.env`)
+- Official `stripe` Python SDK integration.
+- Environment variables: `STRIPE_SECRET_KEY`, `STRIPE_PUBLISHABLE_KEY`, `STRIPE_WEBHOOK_SECRET`.
+
+##### 2. Payment Intent Creation (`POST /bookings/{id}/pay`) (`app/routers/payments.py`)
+- Authenticated customer endpoint (`get_verified_user`).
+- Verifies booking ownership and active 10-minute hold status (`Booking.status == PENDING`).
+- Server calculates total amount in smallest currency unit (cents/pennies) based on `service_tier.price` or `service.base_price`.
+- Creates Stripe `PaymentIntent` with:
+  - `amount`: calculated in cents (integer).
+  - `currency`: `"usd"` (or configured currency).
+  - `metadata`: `{"booking_id": booking.id, "user_id": current_user.id}`.
+  - `idempotency_key`: generated UUID to prevent double charges on network retries.
+- Saves initial `Payment` record in PostgreSQL with status `pending`.
+- Returns `client_secret` to client.
+
+##### 3. Secure Webhook Handler (`POST /webhook/stripe`) (`app/routers/payments.py`)
+- Publicly accessible endpoint receiving raw body payloads directly from Stripe.
+- Cryptographically validates the `stripe-signature` header using `stripe.Webhook.construct_event`.
+- **Idempotency Guard**: Checks if the `Payment` record was already marked `succeeded` before executing state updates (preventing duplicate processing on webhook retries).
+- Dispatches events:
+  - `payment_intent.succeeded`:
+    - Updates `Payment.status = "succeeded"`.
+    - Updates `Booking.status = "confirmed"`.
+    - Updates assigned `InventoryItems.status = "booked"`.
+    - Automatically creates a new `Invoice` record.
+  - `payment_intent.payment_failed`:
+    - Updates `Payment.status = "failed"`.
+    - Updates `Booking.status = "cancelled"`.
+    - Reverts assigned `InventoryItems.status = "available"`.
+
+##### 4. Automatic Invoicing Engine
+- Automatically generates an immutable financial record in `invoices` table upon successful payment:
+  - `invoice_number`: Unique sequential or formatted string (e.g. `INV-2026-XXXX`).
+  - `booking_id`: Linked 1:1 with booking.
+  - `subtotal`, `tax_amount`, and `total_amount`.
+  - `issued_at`: UTC timestamp.
+
+##### 5. Cancellations & Stripe Refunds (`POST /bookings/{id}/cancel`)
+- Customer initiates cancellation of a confirmed booking.
+- Validates cancellation policy window (e.g., event has not started yet).
+- Calls Stripe Refunds API: `stripe.Refund.create(payment_intent=...)`.
+- Reverts seats from `booked` ➔ `available`.
+- Inserts audit row in `cancellations` table (`refund_amount`, `reason`, `cancelled_at`).
+
+---
+
+#### 📋 Sprint 4 Implementation Milestones:
+
+- [ ] **Milestone 4.1 — Stripe SDK Setup & Environment Configuration**:
+  - Install `stripe` SDK via uv (`uv add stripe`).
+  - Configure `STRIPE_SECRET_KEY`, `STRIPE_PUBLISHABLE_KEY`, `STRIPE_WEBHOOK_SECRET` in `app/config.py` and `.env`.
+- [ ] **Milestone 4.2 — Payment Intent Creation (`POST /bookings/{id}/pay`)**:
+  - Implement endpoint in `app/routers/payments.py`.
+  - Server-calculated pricing, active hold check, idempotency key generation.
+  - Insert pending `Payment` row and return `client_secret`.
+- [ ] **Milestone 4.3 — Cryptographic Webhook Handler (`POST /webhook/stripe`)**:
+  - Read raw `Request.body()`.
+  - Verify HMAC signature with `STRIPE_WEBHOOK_SECRET`.
+  - Idempotent event dispatcher for `payment_intent.succeeded` & `payment_intent.payment_failed`.
+- [ ] **Milestone 4.4 — State Transitions & Invoice Generation**:
+  - Transition seats from `reserved` ➔ `booked` on success.
+  - Revert seats to `available` on failure.
+  - Generate formatted `Invoice` record.
+- [ ] **Milestone 4.5 — Cancellations & Stripe Refunds (`POST /bookings/{id}/cancel`)**:
+  - Verify cancellation eligibility window.
+  - Issue refund via Stripe Refunds API.
+  - Release inventory and record in `cancellations`.
+- [ ] **Milestone 4.6 — Automated Mocked Pytest Suite (`tests/test_payments.py`)**:
+  - Mock Stripe API calls and webhook signature generation for offline, 100% deterministic tests.
+
+---
+
+#### 🧪 Automated Payment & Webhook Test Plan (Pytest):
+
+- **Payment Intent Tests (`tests/test_payments.py`)**:
+  - Customer successfully generates `PaymentIntent` for active pending booking (`200 OK` with `client_secret`).
+  - Expired hold is rejected when attempting to pay (`400 Bad Request`).
+  - Unauthorized customer attempting to pay for another user's booking gets `403 Forbidden`.
+  - Paying for already confirmed or cancelled booking gets `400 Bad Request`.
+- **Webhook Security & Signature Tests**:
+  - Valid signed webhook payload transitions booking to `confirmed` and seats to `booked`.
+  - Tampered or missing `stripe-signature` header gets rejected with `400 Bad Request`.
+  - Duplicate webhook delivery is handled idempotently without duplicate invoices or errors.
+  - `payment_intent.payment_failed` cancels booking and releases seats back to `available`.
+- **Refund & Cancellation Tests**:
+  - Confirmed booking refund calls Stripe Refund API and creates `cancellations` row.
+  - Seats return to `available` and can be immediately re-booked by another customer.
+
+---
+
+#### 💡 Sprint 4 Learning Goal:
+
+> You must be able to explain to an interviewer:
+>
+> 1. Why **server-to-server Webhooks** are mandatory for financial systems and why you can never trust the frontend for payment confirmation.
+> 2. How **HMAC cryptographic signature verification** works to prevent webhook spoofing and replay attacks.
+> 3. Why **Idempotency Keys** are required when interacting with payment gateways to prevent double-charging users during network retries.
 
 ---
 
