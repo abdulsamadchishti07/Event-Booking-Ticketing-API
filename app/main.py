@@ -4,7 +4,7 @@ from fastapi import FastAPI
 
 from .routers import locations, services, bookings
 from .routers.auth import auth, users
-from .tasks import run_hold_sweeper_loop
+from .core.tasks import run_hold_sweeper_loop
 
 
 @asynccontextmanager
@@ -20,7 +20,8 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="Event Booking & Ticketing API",
     description="Production-ready Event Booking and Ticketing REST API.",
-    version="1.0.0"
+    version="1.0.0",
+    lifespan=lifespan
 )
 
 # Include API routers

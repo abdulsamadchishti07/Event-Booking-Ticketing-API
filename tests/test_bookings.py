@@ -2,7 +2,7 @@ from datetime import datetime, timedelta, timezone
 import httpx
 import pytest
 from sqlalchemy.orm import Session
-
+from app.core.tasks import released_expired_holds
 from app.database import model
 
 
@@ -213,3 +213,50 @@ async def test_booking_slot_capacity_sold_out(
     res2 = await client.post("/bookings", headers=user_headers, json=payload)
     assert res2.status_code == 409
     assert "Sold out" in res2.json()["detail"]
+
+# 6. Sweeper successfully cleans up expired holds
+async def test_sweeper_cancels_expired_holds(
+    client: httpx.AsyncClient,
+    seller_headers: dict[str, str],
+    user_headers: dict[str, str],
+    db_session: Session
+):
+    # 1
+    # Setup event and book a seat
+    service_id, tier_id = await setup_test_event_with_seats(client, seller_headers)
+    seat = db_session.query(model.InventoryItems).filter_by(
+        service_id=service_id, identifier_code="A-1"
+    ).first()
+
+    now = datetime.now(timezone.utc)
+    payload = {
+        "service_id": service_id,
+        "tier_id": tier_id,
+        "assigned_unit_ids": [seat.id],
+        "quantity": 1,
+        "start_time": (now + timedelta(days=1)).isoformat(),
+        "end_time": (now + timedelta(days=1, hours=2)).isoformat()
+    }
+    # User successfully books the seat
+    res = await client.post("/bookings", headers=user_headers, json=payload)
+    assert res.status_code == 201
+    booking_id = res.json()["id"]
+
+    # 2
+    # HACK THE MATRIX: Fast forward time! 
+    # We manually alter the database to pretend this booking happened 15 minutes ago.
+    booking_record = db_session.query(model.Booking).get(booking_id)
+    booking_record.created_at = now - timedelta(minutes=15)
+    db_session.commit()
+
+    # 3
+    # Trigger the Sweeper manually
+    released_expired_holds()
+
+    # 4 
+    # Verify the Sweeper did its job
+    db_session.refresh(booking_record)
+    db_session.refresh(seat)
+
+    assert booking_record.status == model.BookingStatus.CANCELLED
+    assert seat.status == model.ItemStatus.AVAILABLE
