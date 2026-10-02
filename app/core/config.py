@@ -24,6 +24,11 @@ class Settings(BaseSettings):
     # Redis Settings (Caching & Rate Limiting)
     redis_url: str = "redis://localhost:6379/0"
 
+    # Stripe Settings
+    STRIPE_SECRET_KEY: str = "sk_test_dummy"
+    STRIPE_PUBLISHABLE_KEY: str = "pk_test_dummy"
+    STRIPE_WEBHOOK_SECRET: str = "whsec_dummy"
+
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
 
