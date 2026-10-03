@@ -214,7 +214,7 @@ async def test_search_location(
     assert any("football" in addr for addr in addresses)
 
     # 4. Search for something non-existent and it returns empty list
-    res_empty = await client.get("/locations?search=cricket")
+    res_empty = await client.get("/locations?search=nonexistent_location_query_xyz123")
     assert res_empty.status_code == 200
     assert len(res_empty.json()) == 0
 
