@@ -4,7 +4,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Annotated
 
 import stripe
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, status, Request, Header
 from sqlalchemy.orm import Session
 
 from app.database import get_db, model, schema
@@ -134,3 +134,104 @@ def create_payment_intent_for_booking(
     db.commit()
     db.refresh(payment)
     return payment
+
+@router.post(
+    "/webhook/stripe",
+    status_code=status.HTTP_200_OK,
+    summary="Cryptographically verified Stripe Webhook handler"
+)
+async def stripe_webhook(
+    request: Request,
+    stripe_signature: Annotated[str|None, Header(alias="stripe-signature")] = None,
+    db: Session= Depends(get_db)
+):
+    """
+    Listens for asynchronous webhook events from Stripe:
+    1. Reads raw payload bytes.
+    2. Validates HMAC-SHA256 signature using STRIPE_WEBHOOK_SECRET.
+    3. Handles payment_intent.succeeded (confirms booking, books seats, generates invoice).
+    4. Handles payment_intent.payment_failed (cancels booking, frees seats).
+    """
+
+    if not stripe_signature:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Missing stripe-signature header"
+        )
+    
+    payload = await request.body()
+
+    # 1. Cryptographic Signature Verification
+    try:
+        event = stripe.Webhook.construct_event(
+            payload, stripe_signature, settings.STRIPE_WEBHOOK_SECRET
+        )
+    except ValueError:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid payload"
+        )
+    except stripe.SignatureVerificationError:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid cryptographic signature"
+        )
+
+    event_type = event.get("type")
+    data_obj = event.get("data", {}).get("object", {})
+    payment_intent_id =  data_obj.get("id")
+
+    # 2. Locate Payment record
+    payment = db.query(model.Payment).filter(model.Payment.stripe_payment_intent_id == payment_intent_id).first()
+    if not payment:
+        # Event for an intent not tracked in this database (or test event); return 200 to acknowledge
+        return {"status": "untracked_intent", "event": event_type}
+
+    booking = payment.booking
+
+    # 3. Handle payment_intent.succeeded
+    if event_type == "payment_intent.succeeded":
+        # Idempotency guard: ignore duplicate deliveries
+        if payment.status == model.PaymentStatus.SUCCEEDED:
+            return {"status": "already_processed"}
+        
+        payment.status = model.PaymentStatus.SUCCEEDED
+
+        if booking:
+            booking.status = model.BookingStatus.CONFIRMED
+
+            # Transition seats from 'reserved' to 'booked'
+            for unit in booking.assigned_units:
+                unit.status = model.ItemStatus.BOOKED
+
+        # Auto-generate immutable Invoice
+        existing_invoice = db.query(model.Invoice).filter(
+            model.Invoice.payment_id == payment.id
+        ).first()
+
+        if not existing_invoice:
+            invoice_number = f"INV-{datetime.now(timezone.utc).year}-{payment.id:06d}"
+            invoice = model.Invoice(
+                payment_id=payment.id,
+                invoice_number=invoice_number
+            )
+            db.add(invoice)
+        db.commit()
+        return {"status": "success", "event": event_type}
+
+    # 4. Handle payment_intent.payment_failed
+    elif event_type == "payment_intent.payment_failed":
+        payment.status = model.PaymentStatus.FAILED
+    
+        if booking and booking.status != model.BookingStatus.CONFIRMED:
+            booking.status = model.BookingStatus.CANCELLED
+
+            # Release reserved seats back to 'available'
+            for unit in booking.assigned_units:
+                unit.status = model.ItemStatus.AVAILABLE
+
+        db.commit()
+        return {"status": "failed_recorded", "event": event_type}
+ 
+    # Unhandled event types acknowledged with 200 OK so Stripe stops retrying
+    return {"status": "ignored", "event": event_type}
