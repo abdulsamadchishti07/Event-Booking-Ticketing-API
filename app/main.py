@@ -2,7 +2,7 @@ import asyncio
 from contextlib import asynccontextmanager
 from fastapi import FastAPI
 
-from .routers import locations, services, bookings
+from .routers import locations, services, bookings, payments
 from .routers.auth import auth, users
 from .core.tasks import run_hold_sweeper_loop
 
@@ -30,6 +30,8 @@ app.include_router(auth.router)
 app.include_router(locations.router)
 app.include_router(services.router)
 app.include_router(bookings.router)
+app.include_router(payments.router)
+
 
 @app.get("/", tags=["Health"])
 def root():
