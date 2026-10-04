@@ -15,7 +15,6 @@ from app.core.config import settings
 stripe.api_key = settings.STRIPE_SECRET_KEY
 
 router = APIRouter(
-    prefix="/bookings",
     tags=["Payments"]
 )
 
@@ -23,7 +22,7 @@ HOLD_DURATION_MINUTES = 10
 
 
 @router.post(
-    "/{booking_id}/pay",
+    "/bookings/{booking_id}/pay",
     response_model=schema.PaymentOut,
     status_code=status.HTTP_200_OK,
     summary="Create or retrieve Stripe PaymentIntent for a pending booking"
