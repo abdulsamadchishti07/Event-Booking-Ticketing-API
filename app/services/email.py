@@ -86,3 +86,45 @@ def send_password_reset_email(to_email: str, otp: str) -> None:
     </div>
     """
     send_mail(to_email=to_email, subject=subject, html_content=html_content)
+
+def send_invoice_email(
+    to_email: str,
+    user_name: str,
+    invoice_number: str,
+    event_name: str,
+    quantity: int,
+    total_amount: str,
+    booking_id: int
+) -> None:
+    subject = f"Invoice & Booking Confirmation - {invoice_number}"
+    template = jinja_env.get_template("invoice_email.html")
+    html_content = template.render(
+        user_name=user_name,
+        invoice_number=invoice_number,
+        event_name=event_name,
+        quantity=quantity,
+        total_amount=total_amount,
+        booking_id=booking_id
+    )
+
+    send_mail(to_email=to_email, subject=subject, html_content=html_content)
+
+
+def send_cancellation_email(
+    to_email: str,
+    user_name: str,
+    event_name: str,
+    refund_amount: str,
+    reason: str,
+    booking_id: int
+) -> None:
+    subject = f"Booking #{booking_id} Cancelled & Refund Processed"
+    template = jinja_env.get_template("cancellation_email.html")
+    html_content = template.render(
+        user_name=user_name,
+        event_name=event_name,
+        refund_amount=refund_amount,
+        reason=reason,
+        booking_id=booking_id
+    )
+    send_mail(to_email=to_email, subject=subject, html_content=html_content)
