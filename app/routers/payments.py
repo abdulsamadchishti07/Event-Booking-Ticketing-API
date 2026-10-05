@@ -4,12 +4,13 @@ from datetime import datetime, timedelta, timezone
 from typing import Annotated
 
 import stripe
-from fastapi import APIRouter, Depends, HTTPException, status, Request, Header
+from fastapi import APIRouter, Depends, HTTPException, status, Request, Header, BackgroundTasks
 from sqlalchemy.orm import Session
 
 from app.database import get_db, model, schema
 from app.core import oauth2
 from app.core.config import settings
+from app.services.email import send_invoice_email, send_cancellation_email
 
 # Initialize Stripe API key
 stripe.api_key = settings.STRIPE_SECRET_KEY
@@ -142,6 +143,7 @@ def create_payment_intent_for_booking(
 )
 async def stripe_webhook(
     request: Request,
+    background_tasks: BackgroundTasks,
     stripe_signature: Annotated[str|None, Header(alias="stripe-signature")] = None,
     db: Session= Depends(get_db)
 ):
@@ -216,9 +218,24 @@ async def stripe_webhook(
                 invoice_number=invoice_number
             )
             db.add(invoice)
+        else:
+            invoice_number = existing_invoice.invoice_number
         db.commit()
-        return {"status": "success", "event": event_type}
 
+        # Send invoice email in background
+        if booking and booking.user and booking.user.email:
+            background_tasks.add_task(
+                send_invoice_email,
+                to_email=booking.user.email,
+                user_name=booking.user.name,
+                invoice_number=invoice_number,
+                event_name=booking.service.service_name if booking.service else "Event Ticket",
+                quantity=booking.quantity,
+                total_amount=str(payment.amount),
+                booking_id=booking.id
+            )
+        return {"status": "success", "event": event_type}
+        
     # 4. Handle payment_intent.payment_failed
     elif event_type == "payment_intent.payment_failed":
         payment.status = model.PaymentStatus.FAILED
@@ -232,7 +249,6 @@ async def stripe_webhook(
 
         db.commit()
         return {"status": "failed_recorded", "event": event_type}
- 
     # Unhandled event types acknowledged with 200 OK so Stripe stops retrying
     return {"status": "ignored", "event": event_type}
 
@@ -245,6 +261,7 @@ async def stripe_webhook(
 )
 def cancel_booking_and_refund(
     booking_id: int,
+    background_tasks: BackgroundTasks,
     current_user: Annotated[model.User, Depends(oauth2.get_current_user)],
     cancellation_in: schema.CancellationBase = None,
     db: Session = Depends(get_db)
@@ -326,6 +343,18 @@ def cancel_booking_and_refund(
     db.commit()
     db.refresh(cancellation)
 
+    # Send cancellation email in background
+    if booking and booking.user and booking.user.email:
+        background_tasks.add_task(
+            send_cancellation_email,
+            to_email=booking.user.email,
+            user_name=booking.user.name,
+            event_name=booking.service.service_name if booking.service else "Event Ticket",
+            refund_amount=str(refund_amount),
+            reason=reason_text,
+            booking_id=booking.id
+        )
+        
     return cancellation
 
 
