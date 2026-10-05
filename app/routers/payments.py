@@ -235,3 +235,98 @@ async def stripe_webhook(
  
     # Unhandled event types acknowledged with 200 OK so Stripe stops retrying
     return {"status": "ignored", "event": event_type}
+
+
+@router.post(
+    "/bookings/{booking_id}/cancel",
+    response_model=schema.CancellationOut,
+    status_code=status.HTTP_200_OK,
+    summary="Cancel a booking, issue Stripe refund if paid, and release seats"
+)
+def cancel_booking_and_refund(
+    booking_id: int,
+    current_user: Annotated[model.User, Depends(oauth2.get_current_user)],
+    cancellation_in: schema.CancellationBase = None,
+    db: Session = Depends(get_db)
+):
+    """
+    Cancels a booking and reverses financial settlement:
+    1. Verifies ownership and cancellation policy window.
+    2. If confirmed, issues a full refund via Stripe Refunds API.
+    3. Reverts seats back to 'available'.
+    4. Records an audit row in cancellations table.
+    """
+    now = datetime.now(timezone.utc)
+
+    # 1. Fetch booking
+    booking = db.query(model.Booking).filter(model.Booking.id == booking_id).first()
+    if not booking:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Booking with id {booking_id} not found"
+        )
+
+    # 2. Ownership verification (Customer or Admin)
+    if booking.user_id != current_user.id and current_user.role != model.UserRole.ADMIN:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="You are not authorized to cancel this booking"
+        )
+
+    # 3. Check if already cancelled
+    if booking.status == model.BookingStatus.CANCELLED:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="This booking has already been cancelled"
+        )
+
+    # 4. Check if event has already started
+    if booking.service and now >= booking.service.start_time:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Cannot cancel tickets for an event that has already started"
+        )
+
+    refund_amount = Decimal("0.00")
+
+    # 5. Process Stripe Refund if booking was confirmed/paid
+    if booking.status == model.BookingStatus.CONFIRMED:
+        payment = booking.payment
+        if payment and payment.status == model.PaymentStatus.SUCCEEDED:
+            amount_in_cents = int(payment.amount * 100)
+            try:
+                stripe.Refund.create(
+                    payment_intent=payment.stripe_payment_intent_id,
+                    amount=amount_in_cents,
+                    reason="requested_by_customer"
+                )
+            except stripe.StripeError as e:
+                raise HTTPException(
+                    status_code=status.HTTP_502_BAD_GATEWAY,
+                    detail=f"Stripe Refund Gateway Error: {str(e.user_message or e)}"
+                )
+
+            payment.status = model.PaymentStatus.CANCELED
+            refund_amount = payment.amount
+
+    # 6. Revert booking and seat status
+    booking.status = model.BookingStatus.CANCELLED
+
+    for unit in booking.assigned_units:
+        unit.status = model.ItemStatus.AVAILABLE
+
+    # 7. Record immutable cancellation audit log
+    reason_text = cancellation_in.reason if cancellation_in and cancellation_in.reason else "Cancelled by customer"
+    cancellation = model.Cancellation(
+        booking_id=booking.id,
+        refund_amount=refund_amount,
+        reason=reason_text
+    )
+    db.add(cancellation)
+    db.commit()
+    db.refresh(cancellation)
+
+    return cancellation
+
+
+

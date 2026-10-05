@@ -22,14 +22,14 @@
 
 ## 📊 Sprint Tracker
 
-| Sprint | Title                                           |      Status      | Primary Focus                                                     |
-| :----: | :---------------------------------------------- | :--------------: | :---------------------------------------------------------------- |
-| **1**  | **Foundations & Relational DB Schema**          | ✅ **COMPLETED** | PostgreSQL Schema, ER Diagrams, Alembic Migrations                |
-| **2**  | **Auth, Session Management & Security**         | ✅ **COMPLETED** | JWT, Argon2id, Redis Sessions, Rate Limiting, RBAC & Pytest Suite |
-| **3**  | **Event Management & Concurrency-Safe Booking** | ✅ **COMPLETED** | Event/Seat CRUD, `SELECT FOR UPDATE`, Race condition prevention   |
+| Sprint | Title                                           |       Status       | Primary Focus                                                     |
+| :----: | :---------------------------------------------- | :----------------: | :---------------------------------------------------------------- |
+| **1**  | **Foundations & Relational DB Schema**          |  ✅ **COMPLETED**  | PostgreSQL Schema, ER Diagrams, Alembic Migrations                |
+| **2**  | **Auth, Session Management & Security**         |  ✅ **COMPLETED**  | JWT, Argon2id, Redis Sessions, Rate Limiting, RBAC & Pytest Suite |
+| **3**  | **Event Management & Concurrency-Safe Booking** |  ✅ **COMPLETED**  | Event/Seat CRUD, `SELECT FOR UPDATE`, Race condition prevention   |
 | **4**  | **Stripe Payments & Async Webhooks**            | 🟡 **IN PROGRESS** | PaymentIntents, Webhook signature verification, Invoices, Refunds |
-| **5**  | **Redis Caching & Performance Tuning**          |  ⏳ **PENDING**  | Listing cache, cache invalidation on write, endpoint optimization |
-| **6**  | **Docker, Nginx & Stress Load Testing**         |  ⏳ **PENDING**  | Docker Compose, Nginx reverse proxy, Locust/k6 concurrency tests  |
+| **5**  | **Redis Caching & Performance Tuning**          |   ⏳ **PENDING**   | Listing cache, cache invalidation on write, endpoint optimization |
+| **6**  | **Docker, Nginx & Stress Load Testing**         |   ⏳ **PENDING**   | Docker Compose, Nginx reverse proxy, Locust/k6 concurrency tests  |
 
 ---
 
@@ -352,6 +352,7 @@ To build this systematically without getting trapped in debugging loops, we foll
 > **The Problem**: Sprint 1's schema modeled Services the way a generic appointment system (Calendly, Airbnb) would — the service itself is evergreen ("1-Hour Massage"), and the customer picks the time when booking. So `start_time`/`end_time` were placed on `Booking`.
 >
 > That's wrong for a ticketing platform. An event (a concert, a match) has a fixed date set by the seller, not the customer. Keeping the date on `Booking` caused three real problems:
+>
 > 1. **Blind discovery** — `search_services` had no date to filter or sort on, so "show me events this weekend" was impossible to answer.
 > 2. **Zombie events** — with no event-level end date, a concert that happened two weeks ago stayed listed and bookable forever.
 > 3. **Backwards booking flow** — the customer had to supply `start_time`/`end_time` in the `POST /bookings` payload, meaning they were effectively telling the concert when to happen. For a fixed-date event, that's nonsensical — the date belongs to the event, not the purchase.
@@ -368,7 +369,7 @@ To build this systematically without getting trapped in debugging loops, we foll
 
 #### 🎯 The Core Financial Engineering Challenge:
 
-In Sprint 3, a customer successfully holds a seat or capacity slot for 10 minutes (`Booking.status = "pending"`, `InventoryItems.status = "reserved"`). 
+In Sprint 3, a customer successfully holds a seat or capacity slot for 10 minutes (`Booking.status = "pending"`, `InventoryItems.status = "reserved"`).
 However, **a temporary hold is not a sale**. The core challenge of Sprint 4 is transitioning reservations from temporary holds into irreversible financial and logistical commitments:
 
 1. **Zero-Trust Client Boundary**: The frontend cannot be trusted with monetary amounts or payment confirmations. If a client sends `"amount": 5.00` or claims `"payment succeeded"`, the server must reject it. The backend alone computes the charge, registers the intent with Stripe, and waits for a signed, server-to-server webhook.
@@ -387,7 +388,7 @@ However, **a temporary hold is not a sale**. The core challenge of Sprint 4 is t
 [Customer with 10-Minute Hold]
              │
              ▼
-[POST /bookings/{id}/pay] 
+[POST /bookings/{id}/pay]
              │
              ├── 1. Validate active hold: (created_at + 10m > now()) & status == 'pending'
              ├── 2. Calculate exact total on backend: (quantity * tier.price)
@@ -423,10 +424,12 @@ However, **a temporary hold is not a sale**. The core challenge of Sprint 4 is t
 #### 📦 What Will Be Built:
 
 ##### 1. Stripe SDK Setup & Secret Management (`app/config.py` & `.env`)
+
 - Official `stripe` Python SDK integration.
 - Environment variables: `STRIPE_SECRET_KEY`, `STRIPE_PUBLISHABLE_KEY`, `STRIPE_WEBHOOK_SECRET`.
 
 ##### 2. Payment Intent Creation (`POST /bookings/{id}/pay`) (`app/routers/payments.py`)
+
 - Authenticated customer endpoint (`get_verified_user`).
 - Verifies booking ownership and active 10-minute hold status (`Booking.status == PENDING`).
 - Server calculates total amount in smallest currency unit (cents/pennies) based on `service_tier.price` or `service.base_price`.
@@ -439,6 +442,7 @@ However, **a temporary hold is not a sale**. The core challenge of Sprint 4 is t
 - Returns `client_secret` to client.
 
 ##### 3. Secure Webhook Handler (`POST /webhook/stripe`) (`app/routers/payments.py`)
+
 - Publicly accessible endpoint receiving raw body payloads directly from Stripe.
 - Cryptographically validates the `stripe-signature` header using `stripe.Webhook.construct_event`.
 - **Idempotency Guard**: Checks if the `Payment` record was already marked `succeeded` before executing state updates (preventing duplicate processing on webhook retries).
@@ -454,6 +458,7 @@ However, **a temporary hold is not a sale**. The core challenge of Sprint 4 is t
     - Reverts assigned `InventoryItems.status = "available"`.
 
 ##### 4. Automatic Invoicing Engine
+
 - Automatically generates an immutable financial record in `invoices` table upon successful payment:
   - `invoice_number`: Unique sequential or formatted string (e.g. `INV-2026-XXXX`).
   - `booking_id`: Linked 1:1 with booking.
@@ -461,6 +466,7 @@ However, **a temporary hold is not a sale**. The core challenge of Sprint 4 is t
   - `issued_at`: UTC timestamp.
 
 ##### 5. Cancellations & Stripe Refunds (`POST /bookings/{id}/cancel`)
+
 - Customer initiates cancellation of a confirmed booking.
 - Validates cancellation policy window (e.g., event has not started yet).
 - Calls Stripe Refunds API: `stripe.Refund.create(payment_intent=...)`.
@@ -525,7 +531,7 @@ However, **a temporary hold is not a sale**. The core challenge of Sprint 4 is t
 
 ### Sprint 5: Redis Caching & Smart Invalidation
 
-**Status**: ⏳ **PENDING**
+**Status**: ⏳ **UPNEXT**
 
 #### The Challenge:
 
