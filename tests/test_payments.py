@@ -348,3 +348,118 @@ async def test_webhook_payment_failed(
     assert booking.status == model.BookingStatus.CANCELLED
     assert payment.status == model.PaymentStatus.FAILED
     assert seat.status == model.ItemStatus.AVAILABLE
+
+# ==========================================================
+# 3. CANCELLATION & REFUND TESTS (POST /bookings/{id}/cancel)
+# ==========================================================
+
+async def test_cancel_booking_and_refund_confirmed(
+    client: httpx.AsyncClient,
+    seller_headers: dict[str, str],
+    user_headers: dict[str, str],
+    db_session: Session
+):
+    _, _, seat_id, booking_id = await setup_event_and_booking(client, seller_headers, user_headers, db_session)
+
+    # Set up confirmed booking with successful payment
+    payment = model.Payment(
+        booking_id=booking_id,
+        stripe_payment_intent_id="pi_to_refund_123",
+        client_secret="secret_refund",
+        idempotency_key="key_refund",
+        amount=Decimal("100.00"),
+        currency="usd",
+        status=model.PaymentStatus.SUCCEEDED
+    )
+    db_session.add(payment)
+
+    booking = db_session.query(model.Booking).filter_by(id=booking_id).first()
+    booking.status = model.BookingStatus.CONFIRMED
+
+    seat = db_session.query(model.InventoryItems).filter_by(id=seat_id).first()
+    seat.status = model.ItemStatus.BOOKED
+    db_session.commit()
+
+    with patch("stripe.Refund.create") as mock_refund:
+        mock_refund.return_value = MagicMock(id="re_mock_123", status="succeeded")
+
+        cancel_res = await client.post(
+            f"/bookings/{booking_id}/cancel",
+            headers=user_headers,
+            json={"reason": "Cannot attend due to travel"}
+        )
+
+        assert cancel_res.status_code == 200
+        data = cancel_res.json()
+        assert float(data["refund_amount"]) == 100.00
+        assert data["reason"] == "Cannot attend due to travel"
+
+        # Verify Stripe Refund API was called with amount in cents
+        mock_refund.assert_called_once_with(
+            payment_intent="pi_to_refund_123",
+            amount=10000,
+            reason="requested_by_customer"
+        )
+
+    db_session.expire_all()
+    assert booking.status == model.BookingStatus.CANCELLED
+    assert seat.status == model.ItemStatus.AVAILABLE
+    assert payment.status == model.PaymentStatus.CANCELED
+
+
+async def test_cancel_booking_pending_no_stripe_refund(
+    client: httpx.AsyncClient,
+    seller_headers: dict[str, str],
+    user_headers: dict[str, str],
+    db_session: Session
+):
+    _, _, seat_id, booking_id = await setup_event_and_booking(client, seller_headers, user_headers, db_session)
+
+    with patch("stripe.Refund.create") as mock_refund:
+        cancel_res = await client.post(
+            f"/bookings/{booking_id}/cancel",
+            headers=user_headers,
+            json={"reason": "Changed my mind before paying"}
+        )
+
+        assert cancel_res.status_code == 200
+        assert float(cancel_res.json()["refund_amount"]) == 0.00
+        mock_refund.assert_not_called()
+
+    db_session.expire_all()
+    booking = db_session.query(model.Booking).filter_by(id=booking_id).first()
+    seat = db_session.query(model.InventoryItems).filter_by(id=seat_id).first()
+    assert booking.status == model.BookingStatus.CANCELLED
+    assert seat.status == model.ItemStatus.AVAILABLE
+
+
+async def test_cancel_booking_after_event_started(
+    client: httpx.AsyncClient,
+    seller_headers: dict[str, str],
+    user_headers: dict[str, str],
+    db_session: Session
+):
+    service_id, _, _, booking_id = await setup_event_and_booking(client, seller_headers, user_headers, db_session)
+
+    # Move service start_time into the past
+    service = db_session.query(model.Services).filter_by(id=service_id).first()
+    service.start_time = datetime.now(timezone.utc) - timedelta(hours=1)
+    db_session.commit()
+
+    res = await client.post(f"/bookings/{booking_id}/cancel", headers=user_headers)
+    assert res.status_code == 400
+    assert "already started" in res.json()["detail"]
+
+
+async def test_cancel_booking_unauthorized_user(
+    client: httpx.AsyncClient,
+    seller_headers: dict[str, str],
+    user_headers: dict[str, str],
+    db_session: Session
+):
+    _, _, _, booking_id = await setup_event_and_booking(client, seller_headers, user_headers, db_session)
+
+    # Seller tries to cancel Customer's booking -> 403 Forbidden
+    res = await client.post(f"/bookings/{booking_id}/cancel", headers=seller_headers)
+    assert res.status_code == 403
+    assert "not authorized" in res.json()["detail"]
