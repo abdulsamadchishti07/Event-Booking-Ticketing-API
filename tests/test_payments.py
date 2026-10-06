@@ -199,3 +199,152 @@ async def test_create_payment_intent_already_confirmed_or_cancelled(
     res = await client.post(f"/bookings/{booking_id}/pay", headers=user_headers)
     assert res.status_code == 400
     assert "cancelled" in res.json()["detail"]
+
+
+# ==========================================================
+# 2. STRIPE WEBHOOK TESTS (POST /webhook/stripe)
+# ==========================================================
+
+async def test_webhook_missing_signature(client: httpx.AsyncClient):
+    res = await client.post("/webhook/stripe", content=b"{}")
+    assert res.status_code == 400
+    assert "Missing stripe-signature header" in res.json()["detail"]
+
+
+async def test_webhook_invalid_signature(client: httpx.AsyncClient):
+    with patch("stripe.Webhook.construct_event", side_effect=stripe.SignatureVerificationError("Invalid sig", "sig")):
+        res = await client.post(
+            "/webhook/stripe",
+            content=b'{"id": "evt_test"}',
+            headers={"stripe-signature": "tampered_signature"}
+        )
+        assert res.status_code == 400
+        assert "Invalid cryptographic signature" in res.json()["detail"]
+
+
+async def test_webhook_payment_succeeded(
+    client: httpx.AsyncClient,
+    seller_headers: dict[str, str],
+    user_headers: dict[str, str],
+    db_session: Session
+):
+    _, _, seat_id, booking_id = await setup_event_and_booking(client, seller_headers, user_headers, db_session)
+
+    # 1. Create payment intent
+    mock_intent = MagicMock()
+    mock_intent.id = "pi_webhook_success_123"
+    mock_intent.client_secret = "secret_success"
+
+    with patch("stripe.PaymentIntent.create", return_value=mock_intent):
+        pay_res = await client.post(f"/bookings/{booking_id}/pay", headers=user_headers)
+        assert pay_res.status_code == 200
+
+    # 2. Simulate Stripe sending payment_intent.succeeded webhook
+    mock_event = {
+        "type": "payment_intent.succeeded",
+        "data": {
+            "object": {
+                "id": "pi_webhook_success_123",
+                "amount": 10000,
+                "currency": "usd"
+            }
+        }
+    }
+
+    with patch("stripe.Webhook.construct_event", return_value=mock_event):
+        webhook_res = await client.post(
+            "/webhook/stripe",
+            content=b'{"type": "payment_intent.succeeded"}',
+            headers={"stripe-signature": "valid_mock_signature"}
+        )
+        assert webhook_res.status_code == 200
+        assert webhook_res.json()["status"] == "success"
+
+    # 3. Assert State Transitions
+    db_session.expire_all()
+    booking = db_session.query(model.Booking).filter_by(id=booking_id).first()
+    payment = db_session.query(model.Payment).filter_by(booking_id=booking_id).first()
+    seat = db_session.query(model.InventoryItems).filter_by(id=seat_id).first()
+    invoice = db_session.query(model.Invoice).filter_by(payment_id=payment.id).first()
+
+    assert booking.status == model.BookingStatus.CONFIRMED
+    assert payment.status == model.PaymentStatus.SUCCEEDED
+    assert seat.status == model.ItemStatus.BOOKED
+    assert invoice is not None
+    assert invoice.invoice_number.startswith("INV-")
+
+
+async def test_webhook_idempotency_duplicate_delivery(
+    client: httpx.AsyncClient,
+    seller_headers: dict[str, str],
+    user_headers: dict[str, str],
+    db_session: Session
+):
+    _, _, _, booking_id = await setup_event_and_booking(client, seller_headers, user_headers, db_session)
+
+    mock_intent = MagicMock()
+    mock_intent.id = "pi_duplicate_test"
+    mock_intent.client_secret = "secret_dup"
+
+    with patch("stripe.PaymentIntent.create", return_value=mock_intent):
+        await client.post(f"/bookings/{booking_id}/pay", headers=user_headers)
+
+    mock_event = {
+        "type": "payment_intent.succeeded",
+        "data": {"object": {"id": "pi_duplicate_test"}}
+    }
+
+    with patch("stripe.Webhook.construct_event", return_value=mock_event):
+        # First webhook delivery
+        res1 = await client.post("/webhook/stripe", content=b"{}", headers={"stripe-signature": "sig"})
+        assert res1.status_code == 200
+        assert res1.json()["status"] == "success"
+
+        # Duplicate webhook delivery
+        res2 = await client.post("/webhook/stripe", content=b"{}", headers={"stripe-signature": "sig"})
+        assert res2.status_code == 200
+        assert res2.json()["status"] == "already_processed"
+
+    # Assert exactly 1 invoice exists
+    payment = db_session.query(model.Payment).filter_by(stripe_payment_intent_id="pi_duplicate_test").first()
+    invoice_count = db_session.query(model.Invoice).filter_by(payment_id=payment.id).count()
+    assert invoice_count == 1
+
+
+async def test_webhook_payment_failed(
+    client: httpx.AsyncClient,
+    seller_headers: dict[str, str],
+    user_headers: dict[str, str],
+    db_session: Session
+):
+    _, _, seat_id, booking_id = await setup_event_and_booking(client, seller_headers, user_headers, db_session)
+
+    mock_intent = MagicMock()
+    mock_intent.id = "pi_fail_test"
+    mock_intent.client_secret = "secret_fail"
+
+    with patch("stripe.PaymentIntent.create", return_value=mock_intent):
+        await client.post(f"/bookings/{booking_id}/pay", headers=user_headers)
+
+    mock_event = {
+        "type": "payment_intent.payment_failed",
+        "data": {"object": {"id": "pi_fail_test"}}
+    }
+
+    with patch("stripe.Webhook.construct_event", return_value=mock_event):
+        webhook_res = await client.post(
+            "/webhook/stripe",
+            content=b"{}",
+            headers={"stripe-signature": "valid_sig"}
+        )
+        assert webhook_res.status_code == 200
+        assert webhook_res.json()["status"] == "failed_recorded"
+
+    db_session.expire_all()
+    booking = db_session.query(model.Booking).filter_by(id=booking_id).first()
+    payment = db_session.query(model.Payment).filter_by(booking_id=booking_id).first()
+    seat = db_session.query(model.InventoryItems).filter_by(id=seat_id).first()
+
+    assert booking.status == model.BookingStatus.CANCELLED
+    assert payment.status == model.PaymentStatus.FAILED
+    assert seat.status == model.ItemStatus.AVAILABLE
