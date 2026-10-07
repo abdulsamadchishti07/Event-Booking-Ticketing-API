@@ -2,8 +2,14 @@ from datetime import date, datetime
 from decimal import Decimal
 from typing import List, Optional
 
-from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator, model_validator
-
+from pydantic import (
+    BaseModel, 
+    ConfigDict, 
+    EmailStr, 
+    Field, 
+    field_validator, 
+    model_validator
+)
 from ..database.model import (
     BookingMode,
     BookingStatus,
@@ -381,3 +387,15 @@ class ReviewOut(ReviewBase):
     created_at: datetime
 
     model_config = ConfigDict(from_attributes=True)
+
+
+class ServiceReviewsSummary(BaseModel):
+    service_id: int
+    average_rating: float
+    total_reviews: int
+    reviews: List[ReviewOut]
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+
