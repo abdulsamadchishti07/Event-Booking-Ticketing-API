@@ -76,7 +76,7 @@ def get_locations(
     if country:
         query = query.filter(model.Location.country.ilike(f"%{country}%"))
 
-    return query.offset(offset).limit(limit).all()
+    return query.order_by(model.Location.id.asc()).offset(offset).limit(limit).all()
 
 
 @router.get(

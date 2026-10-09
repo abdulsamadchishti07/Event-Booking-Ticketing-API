@@ -15,19 +15,26 @@ async def get_redis() -> aioredis.Redis:
     return redis_client
 
 
+TRUSTED_PROXIES = {"127.0.0.1", "::1", "localhost", "testclient"}
+
+
 def get_client_ip(request: Request) -> str:
     """
-    Safely extracts the real client IP.
-    Checks X-Forwarded-For header first (for proxies/Cloudflare),
-    then falls back to direct client host.
+    Safely extracts client IP for rate-limiting.
+    Only trusts X-Forwarded-For header when the direct connection originates
+    from a trusted reverse proxy or localhost, preventing untrusted clients from
+    spoofing headers to bypass rate limits.
     """
-    forwarded = request.headers.get("X-Forwarded-For")
-    if forwarded:
-        return forwarded.split(",")[0].strip()
+    client_host = request.client.host if request.client else None
+    if client_host in TRUSTED_PROXIES:
+        forwarded = request.headers.get("X-Forwarded-For")
+        if forwarded:
+            return forwarded.split(",")[0].strip()
+        return client_host or "127.0.0.1"
 
-    if request.client:
-        return request.client.host
-    
+    if client_host:
+        return client_host
+
     return "127.0.0.1"
 
 

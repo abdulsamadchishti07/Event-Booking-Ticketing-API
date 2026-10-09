@@ -3,8 +3,10 @@ from jose import JWTError, jwt
 from fastapi import APIRouter, Depends, HTTPException, status, Response, Request
 from fastapi.security import OAuth2PasswordRequestForm
 from sqlalchemy.orm import Session
+from sqlalchemy import func
 
 from app.core import oauth2, redis as redis_client
+from app.core.config import settings
 from app.core import security as utils
 from app.database import get_db, model, schema
 from app.services import email
@@ -32,11 +34,16 @@ async def login(
     user_credentials: Annotated[OAuth2PasswordRequestForm, Depends()],
     db: Session = Depends(get_db)
 ):
-
-    email = user_credentials.username.strip().lower()
+    """
+    Authenticate user with OAuth2 password request form (username & password in form body):
+    - Validates email (username field) and plaintext password
+    - Verifies that the user account has completed email OTP verification
+    - Generates and returns a signed JWT access token and HttpOnly refresh cookie
+    """
+    email_clean = user_credentials.username.strip().lower()
 
     # check if account is temp lock
-    lock_key = f"account_locked:{email}"
+    lock_key = f"account_locked:{email_clean}"
     if await redis_client.redis_client.get(lock_key):
         ttl = await redis_client.redis_client.ttl(lock_key)
         raise HTTPException(
@@ -46,26 +53,18 @@ async def login(
 
     # 1. Enforce Email Rate Limit (Max 5 attempts in 20 mins = 1200s)
     await redis_client.check_email_and_otp_rate_limiting(
-        email=email,
+        email=email_clean,
         action="login",
         max_request=5,
-        window_seconds=120
+        window_seconds=1200
     )
 
-
-
-    """
-    Authenticate user with OAuth2 password request form (username & password in form body):
-    - Validates email (username field) and plaintext password
-    - Verifies that the user account has completed email OTP verification
-    - Generates and returns a signed JWT access token
-    """
     # 2 Find user by email (OAuth2 specification passes email in the 'username' field)
-    user = db.query(model.User).filter(model.User.email == email).first()
+    user = db.query(model.User).filter(func.lower(model.User.email) == email_clean).first()
 
     # Verify password against hash & track failed attempts
     if not user or not utils.verify_password(user_credentials.password, user.password_hash):
-        failed_key = f"failed_logins:{email}"
+        failed_key = f"failed_logins:{email_clean}"
         failed_attempts = await redis_client.redis_client.incr(failed_key)
         if failed_attempts == 1:
             await redis_client.redis_client.expire(failed_key, 900)
@@ -93,8 +92,8 @@ async def login(
 
     # 3. SUCCESSFUL LOGIN: Reset the email counter!
     # Because they entered the correct password, they are the real user, not an attacker.
-    await redis_client.redis_client.delete(f"failed_logins:{email}")
-    await redis_client.redis_client.delete(f"Rate_limit_Email:{email}:login")
+    await redis_client.redis_client.delete(f"failed_logins:{email_clean}")
+    await redis_client.redis_client.delete(f"Rate_limit_Email:{email_clean}:login")
 
 
     # 4. Generate  Access Token
@@ -118,7 +117,7 @@ async def login(
         key="refresh_token",
         value=refresh_token,
         httponly=True,               # JavaScript cannot steal this token!
-        secure=False,                # Set to True when you deploy with HTTPS
+        secure=settings.cookie_secure, # Configurable via settings
         samesite="lax",              # Protects against CSRF
         max_age=session_ttl          # Cookie will live for 7 days in the browser
     )
@@ -155,13 +154,13 @@ async def refresh_token(
     except JWTError:
         raise HTTPException(status_code=401, detail="Refresh token expired or invalid. Please log in again.")
 
-        # 3. Check Redis: Has this session been logged out or expired?
+    # 3. Check Redis & Rotate: Atomically fetch and delete old session
     old_session_key = f"session:{user_id}:{jti}"
-    session_exists = await redis_client.redis_client.get(old_session_key)
+    session_exists = await redis_client.redis_client.getdel(old_session_key)
     if not session_exists:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Session has expired due to inactivity. Please log in again."
+            detail="Session has expired due to inactivity or was already rotated. Please log in again."
         )
 
     # 4. User must still exist and be active
@@ -169,10 +168,7 @@ async def refresh_token(
     if not user or not user.is_verified:
         raise HTTPException(status_code=401, detail="User account not found or unverified")
 
-    # 5. ROTATE: Delete old session in Redis
-    await redis_client.redis_client.delete(old_session_key)
-
-    # 6. Issue a BRAND NEW Refresh Token + Session (True sliding window!)
+    # 5. Issue a BRAND NEW Refresh Token + Session (True sliding window!)
     new_fresh_token, new_jti = oauth2.create_fresh_token(
         data={"sub": str(user.id)}
     )
@@ -188,7 +184,7 @@ async def refresh_token(
         key="refresh_token",
         value=new_fresh_token,
         httponly=True,
-        secure=False,
+        secure=settings.cookie_secure,
         samesite="lax",
         max_age=session_ttl
     )

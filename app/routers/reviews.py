@@ -23,7 +23,7 @@ router = APIRouter(
 )
 def create_review(
     review_in: schema.ReviewCreate,
-    current_user: Annotated[model.User, Depends(oauth2.get_current_user)],
+    current_user: Annotated[model.User, Depends(oauth2.get_verified_user)],
     db: Session = Depends(get_db)
 ):
     now = datetime.now(timezone.utc)
@@ -46,16 +46,17 @@ def create_review(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=f"Only confirmed paid bookings can be reviewed (current status: {booking.status})"
         )
-    # 4. Event attendance check (event must have started)
-    if booking.service and booking.service.start_time:
-        service_start = booking.service.start_time
-        if service_start.tzinfo is None:
-            service_start = service_start.replace(tzinfo=timezone.utc)
-        if now < service_start:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Cannot review an event before it has taken place"
-            )
+    # 4. Event completion check (event must have finished)
+    if booking.service:
+        event_end = booking.service.end_time or booking.service.start_time
+        if event_end:
+            if event_end.tzinfo is None:
+                event_end = event_end.replace(tzinfo=timezone.utc)
+            if now < event_end:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Cannot review an event before it has taken place"
+                )
     # 5. Check if review already exists for this booking
     existing_review = db.query(model.Review).filter(model.Review.booking_id == booking.id).first()
     if existing_review:
@@ -70,8 +71,15 @@ def create_review(
         comment=review_in.comment
     )
     db.add(review)
-    db.commit()
-    db.refresh(review)
+    try:
+        db.commit()
+        db.refresh(review)
+    except Exception:
+        db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="You have already reviewed this booking."
+        )
     return review
 
 # ==========================================================
@@ -120,7 +128,7 @@ def get_service_reviews(
 def update_review(
     review_id: int,
     review_update: schema.ReviewUpdate,
-    current_user: Annotated[model.User, Depends(oauth2.get_current_user)],
+    current_user: Annotated[model.User, Depends(oauth2.get_verified_user)],
     db: Session = Depends(get_db)
 ):
     review = db.query(model.Review).filter(model.Review.id == review_id).first()
@@ -135,10 +143,11 @@ def update_review(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="You are not authorized to edit this review"
         )
-    if review_update.rating is not None:
-        review.rating = review_update.rating
-    if review_update.comment is not None:
-        review.comment = review_update.comment
+    update_data = review_update.model_dump(exclude_unset=True)
+    if "rating" in update_data:
+        review.rating = update_data["rating"]
+    if "comment" in update_data:
+        review.comment = update_data["comment"]
     db.commit()
     db.refresh(review)
     return review
@@ -152,7 +161,7 @@ def update_review(
 )
 def delete_review(
     review_id: int,
-    current_user: Annotated[model.User, Depends(oauth2.get_current_user)],
+    current_user: Annotated[model.User, Depends(oauth2.get_verified_user)],
     db: Session = Depends(get_db)
 ):
     review = db.query(model.Review).filter(model.Review.id == review_id).first()

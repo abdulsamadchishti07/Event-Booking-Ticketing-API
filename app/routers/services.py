@@ -1,8 +1,8 @@
 from datetime import datetime, timezone
 from typing import Annotated, List, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
-from sqlalchemy import asc, desc
+from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
+from sqlalchemy import asc, desc, func
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, joinedload
 
@@ -44,6 +44,13 @@ def create_services(
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Location with id {services_in.location_id} not found"
+        )
+
+    # Ownership check: seller must own this venue location
+    if location.seller_id != current_user.seller_profile.id and current_user.role != model.UserRole.ADMIN:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="You are not authorized to host services at this location"
         )
     
     # Validate slot_capacity requires max_capacity
@@ -124,10 +131,10 @@ def create_service_tier(
             detail="Not authorized to modify this service"
         )
     
-    # Check for duplicate tier name on this service
+    # Check for duplicate tier name on this service (case-insensitive exact comparison)
     existing_tier = db.query(model.ServiceTier).filter(
         model.ServiceTier.service_id == service_id,
-        model.ServiceTier.name.ilike(tier_in.name)
+        func.lower(model.ServiceTier.name) == tier_in.name.strip().lower()
     ).first()
     if existing_tier:
         raise HTTPException(
@@ -321,15 +328,15 @@ def search_services(
 
     # Sorting
     if sort_by == "date_asc":
-        query = query.order_by(asc(model.Services.start_time))
+        query = query.order_by(asc(model.Services.start_time), asc(model.Services.id))
     elif sort_by == "date_desc":
-        query = query.order_by(desc(model.Services.start_time))
+        query = query.order_by(desc(model.Services.start_time), desc(model.Services.id))
     elif sort_by == "price_asc":
-        query = query.order_by(asc(model.Services.base_price))
+        query = query.order_by(asc(model.Services.base_price), asc(model.Services.id))
     elif sort_by == "price_desc":
-        query = query.order_by(desc(model.Services.base_price))
+        query = query.order_by(desc(model.Services.base_price), desc(model.Services.id))
     else:
-        query = query.order_by(asc(model.Services.start_time))
+        query = query.order_by(asc(model.Services.start_time), asc(model.Services.id))
 
     return query.offset(offset).limit(limit).all()
 
@@ -368,4 +375,105 @@ def get_service_seats(
     )
 
     return seats
+
+
+@router.get(
+    "/{service_id}",
+    response_model=schema.ServiceOut,
+    summary="Get service/event details by ID"
+)
+def get_service_by_id(
+    service_id: int,
+    db: Session = Depends(get_db)
+):
+    service = db.query(model.Services).filter(model.Services.id == service_id).first()
+    if not service:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Service with id {service_id} not found"
+        )
+    return service
+
+
+# ==========================================================
+# 6. Update Service (Seller Only)
+# ==========================================================
+@router.put(
+    "/{service_id}",
+    response_model=schema.ServiceOut,
+    summary="Update an existing service/event"
+)
+def update_service(
+    service_id: int,
+    service_update: schema.ServiceUpdate,
+    current_user: Annotated[model.User, Depends(oauth2.require_seller)],
+    db: Session = Depends(get_db)
+):
+    service = db.query(model.Services).filter(model.Services.id == service_id).first()
+    if not service:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Service with id {service_id} not found"
+        )
+    if service.seller_id != current_user.seller_profile.id and current_user.role != model.UserRole.ADMIN:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Not authorized to modify this service"
+        )
+
+    update_data = service_update.model_dump(exclude_unset=True)
+    start_time = update_data.get("start_time", service.start_time)
+    end_time = update_data.get("end_time", service.end_time)
+    if end_time <= start_time:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="end_time must be strictly after start_time"
+        )
+
+    for key, value in update_data.items():
+        setattr(service, key, value)
+    db.commit()
+    db.refresh(service)
+    return service
+
+
+# ==========================================================
+# 7. Delete Service (Seller Only)
+# ==========================================================
+@router.delete(
+    "/{service_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+    summary="Delete a service/event"
+)
+def delete_service(
+    service_id: int,
+    current_user: Annotated[model.User, Depends(oauth2.require_seller)],
+    db: Session = Depends(get_db)
+):
+    service = db.query(model.Services).filter(model.Services.id == service_id).first()
+    if not service:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Service with id {service_id} not found"
+        )
+    if service.seller_id != current_user.seller_profile.id and current_user.role != model.UserRole.ADMIN:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Not authorized to delete this service"
+        )
+
+    # Prevent deleting an event that already has confirmed bookings
+    has_confirmed = db.query(model.Booking).filter(
+        model.Booking.service_id == service_id,
+        model.Booking.status == model.BookingStatus.CONFIRMED
+    ).first()
+    if has_confirmed:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Cannot delete event with confirmed bookings"
+        )
+
+    db.delete(service)
+    db.commit()
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
 

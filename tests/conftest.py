@@ -22,9 +22,16 @@ def mock_send_email(monkeypatch):
     """
     Prevents background email tasks from hitting SMTP or external services during tests.
     """
-    monkeypatch.setattr("app.email.send_otp_email", lambda to_email, otp: None)
-    monkeypatch.setattr("app.email.send_password_reset_email", lambda to_email, otp: None)
-    monkeypatch.setattr("app.email.send_mail", lambda to_email, subject, html_content: None)
+    monkeypatch.setattr("app.services.email.send_otp_email", lambda *a, **kw: None)
+    monkeypatch.setattr("app.services.email.send_password_reset_email", lambda *a, **kw: None)
+    monkeypatch.setattr("app.services.email.send_invoice_email", lambda *a, **kw: None)
+    monkeypatch.setattr("app.services.email.send_cancellation_email", lambda *a, **kw: None)
+    monkeypatch.setattr("app.services.email.send_mail", lambda *a, **kw: None)
+    monkeypatch.setattr("app.email.send_otp_email", lambda *a, **kw: None)
+    monkeypatch.setattr("app.email.send_password_reset_email", lambda *a, **kw: None)
+    monkeypatch.setattr("app.email.send_invoice_email", lambda *a, **kw: None)
+    monkeypatch.setattr("app.email.send_cancellation_email", lambda *a, **kw: None)
+    monkeypatch.setattr("app.email.send_mail", lambda *a, **kw: None)
 
 
 @pytest.fixture

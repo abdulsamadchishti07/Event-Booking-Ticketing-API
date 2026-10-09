@@ -345,9 +345,10 @@ async def test_webhook_payment_failed(
     payment = db_session.query(model.Payment).filter_by(booking_id=booking_id).first()
     seat = db_session.query(model.InventoryItems).filter_by(id=seat_id).first()
 
-    assert booking.status == model.BookingStatus.CANCELLED
+    assert booking.status == model.BookingStatus.PENDING
     assert payment.status == model.PaymentStatus.FAILED
-    assert seat.status == model.ItemStatus.AVAILABLE
+    assert seat.status == model.ItemStatus.RESERVED
+
 
 # ==========================================================
 # 3. CANCELLATION & REFUND TESTS (POST /bookings/{id}/cancel)
@@ -394,11 +395,12 @@ async def test_cancel_booking_and_refund_confirmed(
         assert float(data["refund_amount"]) == 100.00
         assert data["reason"] == "Cannot attend due to travel"
 
-        # Verify Stripe Refund API was called with amount in cents
+        # Verify Stripe Refund API was called with amount in cents and deterministic idempotency key
         mock_refund.assert_called_once_with(
             payment_intent="pi_to_refund_123",
             amount=10000,
-            reason="requested_by_customer"
+            reason="requested_by_customer",
+            idempotency_key=f"refund_booking_{booking_id}"
         )
 
     db_session.expire_all()

@@ -1,4 +1,4 @@
-import uuid
+import logging
 from decimal import Decimal
 from datetime import datetime, timedelta, timezone
 from typing import Annotated
@@ -10,7 +10,9 @@ from sqlalchemy.orm import Session
 from app.database import get_db, model, schema
 from app.core import oauth2
 from app.core.config import settings
-from app.services.email import send_invoice_email, send_cancellation_email
+from app.services import email
+
+logger = logging.getLogger(__name__)
 
 # Initialize Stripe API key
 stripe.api_key = settings.STRIPE_SECRET_KEY
@@ -19,7 +21,7 @@ router = APIRouter(
     tags=["Payments"]
 )
 
-HOLD_DURATION_MINUTES = 10
+HOLD_DURATION_MINUTES = settings.HOLD_DURATION_MINUTES
 
 
 @router.post(
@@ -30,21 +32,23 @@ HOLD_DURATION_MINUTES = 10
 )
 def create_payment_intent_for_booking(
     booking_id: int,
-    current_user: Annotated[model.User, Depends(oauth2.get_current_user)],
+    background_tasks: BackgroundTasks,
+    current_user: Annotated[model.User, Depends(oauth2.get_verified_user)],
     db: Session = Depends(get_db)
 ):
     """
     Initiates payment for an active reservation hold:
-    1. Validates booking ownership.
-    2. Enforces active 10-minute hold TTL.
-    3. Calculates total amount on the server (zero-trust).
-    4. Creates Stripe PaymentIntent with an idempotency key.
-    5. Saves payment record and returns client_secret.
+    1. Validates booking ownership with pessimistic lock.
+    2. Enforces active hold TTL.
+    3. Calculates total amount on the server (zero-trust, prioritizing unit tiers).
+    4. Handles free events ($0.00) without external gateway.
+    5. Creates Stripe PaymentIntent with a deterministic idempotency key.
+    6. Saves payment record and returns client_secret.
     """
     now = datetime.now(timezone.utc)
 
-    # 1. Fetch booking
-    booking = db.query(model.Booking).filter(model.Booking.id == booking_id).first()
+    # 1. Fetch booking with pessimistic row lock
+    booking = db.query(model.Booking).filter(model.Booking.id == booking_id).with_for_update().first()
     if not booking:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -70,7 +74,7 @@ def create_payment_intent_for_booking(
             detail="This booking has been cancelled and cannot be paid for"
         )
 
-    # 4. Enforce 10-minute hold TTL
+    # 4. Enforce hold TTL
     hold_expiry = booking.created_at + timedelta(minutes=HOLD_DURATION_MINUTES)
     if now > hold_expiry:
         raise HTTPException(
@@ -78,31 +82,101 @@ def create_payment_intent_for_booking(
             detail="Reservation hold has expired. Please create a new booking."
         )
 
-    # 5. Check if a Payment already exists for this booking (Idempotency)
+    # 5. Check if a Payment already exists for this booking (Reconcile / Idempotency)
     existing_payment = db.query(model.Payment).filter(model.Payment.booking_id == booking_id).first()
     if existing_payment:
-        return existing_payment
+        if existing_payment.status == model.PaymentStatus.SUCCEEDED:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="This booking has already been paid and confirmed"
+            )
+        # Reusable active pending payment
+        if existing_payment.status in [
+            model.PaymentStatus.REQUIRES_PAYMENT_METHOD,
+            model.PaymentStatus.REQUIRES_CONFIRMATION,
+            model.PaymentStatus.PROCESSING
+        ]:
+            return existing_payment
+
+        # If payment had failed (e.g. card declined), reconcile with Stripe
+        if existing_payment.status == model.PaymentStatus.FAILED:
+            try:
+                intent = stripe.PaymentIntent.retrieve(existing_payment.stripe_payment_intent_id)
+                # If still open on Stripe, reactivate and return client_secret
+                if intent.status in ["requires_payment_method", "requires_confirmation", "requires_action"]:
+                    existing_payment.status = model.PaymentStatus.REQUIRES_PAYMENT_METHOD
+                    existing_payment.client_secret = intent.client_secret
+                    db.commit()
+                    db.refresh(existing_payment)
+                    return existing_payment
+            except Exception as e:
+                logger.warning(f"Could not retrieve Stripe intent {existing_payment.stripe_payment_intent_id}: {e}")
 
     # 6. Calculate total amount (Zero-Trust Server Calculation)
+    # Unit-assigned bookings MUST price from the seats' own tiers to prevent tier manipulation
     total_amount: Decimal = Decimal("0.00")
-    if booking.tier:
+    if booking.assigned_units:
+        total_amount = sum(
+            Decimal(unit.tier.price) if unit.tier else Decimal(booking.service.base_price)
+            for unit in booking.assigned_units
+        )
+    elif booking.tier:
         total_amount = Decimal(booking.tier.price) * booking.quantity
-    elif booking.assigned_units:
-        total_amount = sum(Decimal(unit.tier.price) for unit in booking.assigned_units if unit.tier)
     else:
         total_amount = Decimal(booking.service.base_price) * booking.quantity
 
-    if total_amount <= 0:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Total amount must be greater than zero"
+    idempotency_key = f"booking_{booking.id}" if not existing_payment else f"booking_{booking.id}_retry"
+
+    # 7. Free Event Handling: auto-confirm without calling Stripe
+    if total_amount <= Decimal("0.00"):
+        total_amount = Decimal("0.00")
+        booking.status = model.BookingStatus.CONFIRMED
+        for unit in booking.assigned_units:
+            unit.status = model.ItemStatus.BOOKED
+
+        if existing_payment:
+            existing_payment.amount = Decimal("0.00")
+            existing_payment.status = model.PaymentStatus.SUCCEEDED
+            payment = existing_payment
+        else:
+            payment = model.Payment(
+                booking_id=booking.id,
+                stripe_payment_intent_id=f"free_booking_{booking.id}",
+                client_secret="free_booking",
+                idempotency_key=idempotency_key,
+                amount=total_amount,
+                currency="usd",
+                status=model.PaymentStatus.SUCCEEDED
+            )
+            db.add(payment)
+        db.flush()
+
+        invoice_number = f"INV-{datetime.now(timezone.utc).year}-{payment.id:06d}"
+        invoice = model.Invoice(
+            payment_id=payment.id,
+            invoice_number=invoice_number
         )
+        db.add(invoice)
+        db.commit()
+        db.refresh(payment)
+
+        if booking.user and booking.user.email:
+            background_tasks.add_task(
+                email.send_invoice_email,
+                to_email=booking.user.email,
+                user_name=booking.user.name,
+                invoice_number=invoice_number,
+                event_name=booking.service.service_name if booking.service else "Event Ticket",
+                quantity=booking.quantity,
+                total_amount=str(payment.amount),
+                booking_id=booking.id
+            )
+        return payment
 
     # Convert to integer cents for Stripe (e.g. 20.00 -> 2000)
     amount_in_cents = int(total_amount * 100)
-    idempotency_key = f"booking_{booking.id}_{uuid.uuid4()}"
 
-    # 7. Call Stripe API to create PaymentIntent
+    # 8. Call Stripe API to create PaymentIntent
     try:
         payment_intent = stripe.PaymentIntent.create(
             amount=amount_in_cents,
@@ -120,7 +194,17 @@ def create_payment_intent_for_booking(
             detail=f"Payment Gateway Error: {str(e.user_message or e)}"
         )
 
-    # 8. Store payment record in database
+    # 9. Store or update payment record in database
+    if existing_payment:
+        existing_payment.stripe_payment_intent_id = payment_intent.id
+        existing_payment.client_secret = payment_intent.client_secret
+        existing_payment.idempotency_key = idempotency_key
+        existing_payment.amount = total_amount
+        existing_payment.status = model.PaymentStatus.REQUIRES_PAYMENT_METHOD
+        db.commit()
+        db.refresh(existing_payment)
+        return existing_payment
+
     payment = model.Payment(
         booking_id=booking.id,
         stripe_payment_intent_id=payment_intent.id,
@@ -136,6 +220,7 @@ def create_payment_intent_for_booking(
     db.refresh(payment)
     return payment
 
+
 @router.post(
     "/webhook/stripe",
     status_code=status.HTTP_200_OK,
@@ -144,23 +229,22 @@ def create_payment_intent_for_booking(
 async def stripe_webhook(
     request: Request,
     background_tasks: BackgroundTasks,
-    stripe_signature: Annotated[str|None, Header(alias="stripe-signature")] = None,
-    db: Session= Depends(get_db)
+    stripe_signature: Annotated[str | None, Header(alias="stripe-signature")] = None,
+    db: Session = Depends(get_db)
 ):
     """
     Listens for asynchronous webhook events from Stripe:
-    1. Reads raw payload bytes.
+    1. Reads raw payload bytes asynchronously.
     2. Validates HMAC-SHA256 signature using STRIPE_WEBHOOK_SECRET.
-    3. Handles payment_intent.succeeded (confirms booking, books seats, generates invoice).
-    4. Handles payment_intent.payment_failed (cancels booking, frees seats).
+    3. Handles payment_intent.succeeded (auto-refunds if booking cancelled; else confirms booking, books seats, generates invoice).
+    4. Handles payment_intent.payment_failed (records failure without cancelling booking to allow retries).
     """
-
     if not stripe_signature:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Missing stripe-signature header"
         )
-    
+
     payload = await request.body()
 
     # 1. Cryptographic Signature Verification
@@ -181,12 +265,11 @@ async def stripe_webhook(
 
     event_type = event.get("type")
     data_obj = event.get("data", {}).get("object", {})
-    payment_intent_id =  data_obj.get("id")
+    payment_intent_id = data_obj.get("id")
 
     # 2. Locate Payment record
     payment = db.query(model.Payment).filter(model.Payment.stripe_payment_intent_id == payment_intent_id).first()
     if not payment:
-        # Event for an intent not tracked in this database (or test event); return 200 to acknowledge
         return {"status": "untracked_intent", "event": event_type}
 
     booking = payment.booking
@@ -196,7 +279,22 @@ async def stripe_webhook(
         # Idempotency guard: ignore duplicate deliveries
         if payment.status == model.PaymentStatus.SUCCEEDED:
             return {"status": "already_processed"}
-        
+
+        # Prevent double-selling seats: if booking was already cancelled or swept, auto-refund!
+        if booking and booking.status == model.BookingStatus.CANCELLED:
+            payment.status = model.PaymentStatus.CANCELED
+            db.commit()
+            try:
+                stripe.Refund.create(
+                    payment_intent=payment_intent_id,
+                    amount=int(payment.amount * 100),
+                    reason="requested_by_customer",
+                    idempotency_key=f"auto_refund_{payment_intent_id}"
+                )
+            except Exception as e:
+                logger.error(f"Auto-refund failed for cancelled booking {booking.id}: {e}")
+            return {"status": "auto_refunded_cancelled_booking", "event": event_type}
+
         payment.status = model.PaymentStatus.SUCCEEDED
 
         if booking:
@@ -225,7 +323,7 @@ async def stripe_webhook(
         # Send invoice email in background
         if booking and booking.user and booking.user.email:
             background_tasks.add_task(
-                send_invoice_email,
+                email.send_invoice_email,
                 to_email=booking.user.email,
                 user_name=booking.user.name,
                 invoice_number=invoice_number,
@@ -235,20 +333,14 @@ async def stripe_webhook(
                 booking_id=booking.id
             )
         return {"status": "success", "event": event_type}
-        
+
     # 4. Handle payment_intent.payment_failed
     elif event_type == "payment_intent.payment_failed":
         payment.status = model.PaymentStatus.FAILED
-    
-        if booking and booking.status != model.BookingStatus.CONFIRMED:
-            booking.status = model.BookingStatus.CANCELLED
-
-            # Release reserved seats back to 'available'
-            for unit in booking.assigned_units:
-                unit.status = model.ItemStatus.AVAILABLE
-
+        # Do NOT cancel booking on first card decline; let the hold expire or customer retry
         db.commit()
         return {"status": "failed_recorded", "event": event_type}
+
     # Unhandled event types acknowledged with 200 OK so Stripe stops retrying
     return {"status": "ignored", "event": event_type}
 
@@ -262,21 +354,22 @@ async def stripe_webhook(
 def cancel_booking_and_refund(
     booking_id: int,
     background_tasks: BackgroundTasks,
-    current_user: Annotated[model.User, Depends(oauth2.get_current_user)],
+    current_user: Annotated[model.User, Depends(oauth2.get_verified_user)],
     cancellation_in: schema.CancellationBase = None,
     db: Session = Depends(get_db)
 ):
     """
     Cancels a booking and reverses financial settlement:
-    1. Verifies ownership and cancellation policy window.
-    2. If confirmed, issues a full refund via Stripe Refunds API.
-    3. Reverts seats back to 'available'.
-    4. Records an audit row in cancellations table.
+    1. Verifies ownership and cancellation policy window with pessimistic row lock.
+    2. If confirmed, issues a full refund via Stripe Refunds API with deterministic idempotency key.
+    3. If pending, cancels any active Stripe PaymentIntent.
+    4. Reverts seats back to 'available'.
+    5. Records an audit row in cancellations table.
     """
     now = datetime.now(timezone.utc)
 
-    # 1. Fetch booking
-    booking = db.query(model.Booking).filter(model.Booking.id == booking_id).first()
+    # 1. Fetch booking with pessimistic lock
+    booking = db.query(model.Booking).filter(model.Booking.id == booking_id).with_for_update().first()
     if not booking:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -310,21 +403,32 @@ def cancel_booking_and_refund(
     if booking.status == model.BookingStatus.CONFIRMED:
         payment = booking.payment
         if payment and payment.status == model.PaymentStatus.SUCCEEDED:
-            amount_in_cents = int(payment.amount * 100)
-            try:
-                stripe.Refund.create(
-                    payment_intent=payment.stripe_payment_intent_id,
-                    amount=amount_in_cents,
-                    reason="requested_by_customer"
-                )
-            except stripe.StripeError as e:
-                raise HTTPException(
-                    status_code=status.HTTP_502_BAD_GATEWAY,
-                    detail=f"Stripe Refund Gateway Error: {str(e.user_message or e)}"
-                )
+            if payment.amount > Decimal("0.00") and not payment.stripe_payment_intent_id.startswith("free_"):
+                amount_in_cents = int(payment.amount * 100)
+                try:
+                    stripe.Refund.create(
+                        payment_intent=payment.stripe_payment_intent_id,
+                        amount=amount_in_cents,
+                        reason="requested_by_customer",
+                        idempotency_key=f"refund_booking_{booking.id}"
+                    )
+                except stripe.StripeError as e:
+                    raise HTTPException(
+                        status_code=status.HTTP_502_BAD_GATEWAY,
+                        detail=f"Stripe Refund Gateway Error: {str(e.user_message or e)}"
+                    )
 
             payment.status = model.PaymentStatus.CANCELED
             refund_amount = payment.amount
+
+    elif booking.payment and booking.payment.stripe_payment_intent_id and not booking.payment.stripe_payment_intent_id.startswith("free_"):
+        # Cancel pending Stripe PaymentIntent if booking was not confirmed
+        if booking.payment.status == model.PaymentStatus.REQUIRES_PAYMENT_METHOD:
+            try:
+                stripe.PaymentIntent.cancel(booking.payment.stripe_payment_intent_id)
+                booking.payment.status = model.PaymentStatus.CANCELED
+            except Exception as e:
+                logger.warning(f"Could not cancel Stripe PaymentIntent: {e}")
 
     # 6. Revert booking and seat status
     booking.status = model.BookingStatus.CANCELLED
@@ -346,7 +450,7 @@ def cancel_booking_and_refund(
     # Send cancellation email in background
     if booking and booking.user and booking.user.email:
         background_tasks.add_task(
-            send_cancellation_email,
+            email.send_cancellation_email,
             to_email=booking.user.email,
             user_name=booking.user.name,
             event_name=booking.service.service_name if booking.service else "Event Ticket",
@@ -354,8 +458,5 @@ def cancel_booking_and_refund(
             reason=reason_text,
             booking_id=booking.id
         )
-        
+
     return cancellation
-
-
-

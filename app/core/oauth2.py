@@ -31,6 +31,7 @@ def create_access_token(data: dict, expires_delta: timedelta | None = None) -> s
     # Add a unique ID to access tokens for lightweight blacklisting
     if "jti" not in to_encode:
         to_encode["jti"] = str(uuid.uuid4())
+    to_encode["type"] = "access"
 
     if expires_delta:
         expire = datetime.now(timezone.utc) + expires_delta
@@ -100,7 +101,8 @@ async def get_current_user(
         payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
         user_id: str | None = payload.get("sub")
         jti = payload.get("jti")
-        if user_id is None:
+        token_type = payload.get("type")
+        if user_id is None or token_type != "access":
             raise credentials_exception
     except JWTError:
         raise credentials_exception
@@ -151,7 +153,11 @@ async def get_optional_current_user(
     try:
         payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
         user_id: str | None = payload.get("sub")
-        if user_id is None:
+        jti = payload.get("jti")
+        token_type = payload.get("type")
+        if user_id is None or token_type != "access":
+            return None
+        if jti and await redis.redis_client.get(f"blacklist:{jti}"):
             return None
         user = db.query(model.User).filter(model.User.id == int(user_id)).first()
         return user if (user and user.is_verified) else None

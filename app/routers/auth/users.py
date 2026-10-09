@@ -1,8 +1,9 @@
-import random
+import secrets
 from datetime import datetime, timedelta, timezone
 from typing import Annotated
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, status, Response
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from app.core import oauth2, redis as redis_client
@@ -35,34 +36,46 @@ def create_account(
 ):
     """
     Register a new user account:
-    - Checks for existing email conflicts
+    - Checks for existing email conflicts (case-insensitive)
     - Hashes the plaintext password
-    - Generates a 6-digit verification OTP valid for 5 minutes
+    - Generates a cryptographically secure 6-digit verification OTP valid for 5 minutes
+    - Enforces default CUSTOMER role
     - Saves unverified user to the database
     - Dispatches verification email asynchronously via background tasks
     """
-    # Check if a user with this email is already registered
-    existing_user = db.query(model.User).filter(model.User.email == user.email).first()
+    clean_email = user.email.strip().lower()
+
+    # Check if a user with this email is already registered (case-insensitive)
+    existing_user = db.query(model.User).filter(func.lower(model.User.email) == clean_email).first()
     if existing_user:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
-            detail=f"User with email '{user.email}' already exists."
+            detail=f"User with email '{clean_email}' already exists."
         )
+
+    # Check if phone number is already registered
+    if user.phone_no:
+        existing_phone = db.query(model.User).filter(model.User.phone_no == user.phone_no).first()
+        if existing_phone:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="User with this phone number already exists."
+            )
 
     # Securely hash user password
     hashed_password = utils.hash(user.password)
 
-    # Generate a random 6-digit OTP code and expiry timestamp (UTC)
-    otp = f"{random.randint(100000, 999999)}"
+    # Generate a cryptographically secure 6-digit OTP code and expiry timestamp (UTC)
+    otp = f"{secrets.randbelow(900000) + 100000}"
     expires_at = datetime.now(timezone.utc) + timedelta(minutes=OTP_EXPIRY_MINUTES)
 
-    # Create new User model instance
+    # Create new User model instance - ALWAYS default to CUSTOMER
     new_user = model.User(
         name=user.name,
-        email=user.email,
+        email=clean_email,
         dob=user.dob,
         phone_no=user.phone_no,
-        role=user.role,
+        role=model.UserRole.CUSTOMER,
         password_hash=hashed_password,
         is_verified=False,
         verification_otp=otp,
@@ -92,15 +105,6 @@ async def verify_otp(
     payload: schema.VerifyOTP,
     db: Session = Depends(get_db)
 ):
-
-    # Stop 6-digit PIN brute forcing
-    await redis_client.check_email_and_otp_rate_limiting(
-        email=payload.email,
-        action="verify_otp",
-        max_request=5,
-        window_seconds=300
-    )
-
     """
     Verifies user's email account using the 6-digit OTP:
     - Confirms user exists
@@ -108,7 +112,17 @@ async def verify_otp(
     - Checks if OTP has expired
     - Activates account (is_verified = True) and clears OTP fields
     """
-    user = db.query(model.User).filter(model.User.email == payload.email).first()
+    clean_email = payload.email.strip().lower()
+
+    # Stop 6-digit PIN brute forcing
+    await redis_client.check_email_and_otp_rate_limiting(
+        email=clean_email,
+        action="verify_otp",
+        max_request=5,
+        window_seconds=300
+    )
+
+    user = db.query(model.User).filter(func.lower(model.User.email) == clean_email).first()
     if not user:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -163,16 +177,6 @@ async def resend_otp(
     background_tasks: BackgroundTasks,
     db: Session = Depends(get_db)
 ):
-
-    # Prevent email spamming
-    await redis_client.check_email_and_otp_rate_limiting(
-        email=payload.email,
-        action="resend_otp",
-        max_request=1,
-        window_seconds=120
-    )
-
-
     """
     Generates and emails a new OTP code for unverified accounts:
     - Confirms user exists
@@ -180,11 +184,21 @@ async def resend_otp(
     - Generates new 6-digit code and refreshes 5-minute expiry
     - Commits new OTP to DB and dispatches email
     """
-    user = db.query(model.User).filter(model.User.email == payload.email).first()
+    clean_email = payload.email.strip().lower()
+
+    # Prevent email spamming
+    await redis_client.check_email_and_otp_rate_limiting(
+        email=clean_email,
+        action="resend_otp",
+        max_request=1,
+        window_seconds=120
+    )
+
+    user = db.query(model.User).filter(func.lower(model.User.email) == clean_email).first()
     if not user:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"User with email '{payload.email}' does not exist."
+            detail=f"User with email '{clean_email}' does not exist."
         )
 
     # If already verified, do not send another OTP
@@ -192,7 +206,7 @@ async def resend_otp(
         return {"message": "Account is already verified and active. You can log in."}
 
     # Generate a new 6-digit OTP with a refreshed 5-minute expiry window
-    otp = f"{random.randint(100000, 999999)}"
+    otp = f"{secrets.randbelow(900000) + 100000}"
     user.verification_otp = otp
     user.otp_expires_at = datetime.now(timezone.utc) + timedelta(minutes=OTP_EXPIRY_MINUTES)
     db.commit()
@@ -236,6 +250,7 @@ def get_user_by_id(
     """
     Dynamically fetches and returns any user's profile by their user ID:
     e.g. GET /account/1, GET /account/2
+    Restricted to account owner or system administrators.
     """
     target_user = db.query(model.User).filter(model.User.id == id).first()
     if not target_user:
@@ -244,8 +259,14 @@ def get_user_by_id(
             detail=f"User with ID {id} does not exist."
         )
 
-    return target_user
+    # Privacy Protection: Only account owner or Admin may read profile
+    if current_user.id != target_user.id and current_user.role != model.UserRole.ADMIN:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="You are not authorized to view this profile."
+        )
 
+    return target_user
 
 
 # ==========================================================
@@ -256,7 +277,7 @@ def get_user_by_id(
     response_model=schema.UserOut,
     summary="Update user profile"
 )
-def update_user(
+async def update_user(
     id: int,
     user_update: schema.UserUpdate,
     current_user: Annotated[model.User, Depends(oauth2.get_verified_user)],
@@ -266,7 +287,7 @@ def update_user(
     Updates user details for the authenticated user:
     - Verifies ownership (users can only update their own profile)
     - Checks for email uniqueness if updating email
-    - Securely re-hashes password if provided
+    - Securely re-hashes password if provided and revokes active sessions
     """
     user_query = db.query(model.User).filter(model.User.id == id)
     user = user_query.first()
@@ -284,27 +305,45 @@ def update_user(
             detail="You are not allowed to perform this action."
         )
 
-    # If updating email, ensure it's not already taken by another account
-    if user_update.email and user_update.email != user.email:
-        email_taken = db.query(model.User).filter(model.User.email == user_update.email).first()
-        if email_taken:
-            raise HTTPException(
-                status_code=status.HTTP_409_CONFLICT,
-                detail=f"Email '{user_update.email}' is already in use by another account."
-            )
-
     # Extract only the fields explicitly provided in the request body
     update_data = user_update.model_dump(exclude_unset=True)
 
+    # If updating email, ensure it's not already taken by another account
+    if "email" in update_data and update_data["email"]:
+        new_email = update_data["email"].strip().lower()
+        if new_email != user.email.lower():
+            email_taken = db.query(model.User).filter(func.lower(model.User.email) == new_email).first()
+            if email_taken:
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail=f"Email '{new_email}' is already in use by another account."
+                )
+            update_data["email"] = new_email
+            update_data["is_verified"] = False
+
+    # If updating phone number, ensure uniqueness
+    if "phone_no" in update_data and update_data["phone_no"] and update_data["phone_no"] != user.phone_no:
+        phone_taken = db.query(model.User).filter(model.User.phone_no == update_data["phone_no"]).first()
+        if phone_taken:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="Phone number is already in use by another account."
+            )
+
+    password_changed = False
     # Hash new password and map to 'password_hash' column if password was provided
     if "password" in update_data and update_data["password"]:
         update_data["password_hash"] = utils.hash(update_data.pop("password"))
+        password_changed = True
 
     if update_data:
         for key, value in update_data.items():
             setattr(user, key, value)
         db.commit()
         db.refresh(user)
+
+    if password_changed:
+        await redis_client.revoke_all_user_sessions(user.id)
 
     return user
 
@@ -326,6 +365,7 @@ def delete_user(
     Deletes an account:
     - Verifies user exists
     - Ensures user is deleting their own account
+    - Validates no existing bookings block deletion
     """
     user = db.query(model.User).filter(model.User.id == id).first()
     if not user:
@@ -341,9 +381,18 @@ def delete_user(
             detail="You are not allowed to perform this action."
         )
 
+    # Check for existing bookings
+    has_bookings = db.query(model.Booking).filter(model.Booking.user_id == user.id).first()
+    if has_bookings:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Cannot delete account with associated bookings. Cancel or complete your bookings first."
+        )
+
     db.delete(user)
     db.commit()
     return Response(status_code=status.HTTP_204_NO_CONTENT)
+
 
 # ==========================================================
 # 8. Reset Password 
@@ -356,7 +405,7 @@ def delete_user(
 async def forgot_password(
     payload: schema.ForgotPasswordRequest,
     background_tasks: BackgroundTasks,
-    db: Session= Depends(get_db)
+    db: Session = Depends(get_db)
 ):
     clean_email = payload.email.strip().lower()
 
@@ -369,13 +418,13 @@ async def forgot_password(
     )
  
     # Check if user exists
-    user = db.query(model.User).filter(model.User.email == clean_email).first()
+    user = db.query(model.User).filter(func.lower(model.User.email) == clean_email).first()
     if not user:
         # Generic response to prevent email enumeration/discovery attacks
         return {"message": "If this email is registered, a password reset code has been sent."}
     
     # Generate 6-digit OTP and store in Redis with 5-minute expiry (300 seconds)
-    otp = f"{random.randint(100000, 999999)}"
+    otp = f"{secrets.randbelow(900000) + 100000}"
     await redis_client.redis_client.set(f"reset_pwd_otp:{clean_email}", otp, ex=300)
 
     # Send reset code email in the background

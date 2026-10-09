@@ -67,7 +67,6 @@ class UserBase(BaseModel):
     email: EmailStr
     dob: date
     phone_no: Optional[str] = Field(None, max_length=20)
-    role: Optional[UserRole] = Field(default=UserRole.CUSTOMER)
 
 
 class UserCreate(UserBase):
@@ -79,7 +78,6 @@ class UserUpdate(BaseModel):
     email: Optional[EmailStr] = None
     dob: Optional[date] = None
     phone_no: Optional[str] = Field(None, max_length=20)
-    role: Optional[UserRole] = None
     password: Optional[str] = Field(None, min_length=6, max_length=100)
 
 class UserOut(BaseModel):
@@ -257,14 +255,15 @@ class BulkInventoryCreate(BaseModel):
     @field_validator("identifier_codes")
     @classmethod
     def validate_unique_identifier_codes(cls, codes: List[str]) -> List[str]:
-        for code in codes:
-            if not code or len(code.strip()) == 0:
+        stripped = [code.strip() for code in codes]
+        for code in stripped:
+            if not code:
                 raise ValueError("Identifier codes cannot be empty")
             if len(code) > 20:
                 raise ValueError("Identifier code cannot exceed 20 characters")
-        if len(codes) != len(set(codes)):
+        if len(stripped) != len(set(stripped)):
             raise ValueError("Duplicate identifier codes in the request are not allowed")
-        return codes
+        return stripped
 
 # ==========================================================
 # 7. Booking Schemas
