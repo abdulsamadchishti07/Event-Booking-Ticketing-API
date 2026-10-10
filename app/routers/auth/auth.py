@@ -117,7 +117,7 @@ async def login(
         key="refresh_token",
         value=refresh_token,
         httponly=True,               # JavaScript cannot steal this token!
-        secure=settings.cookie_secure, # Configurable via settings
+        secure=settings.is_cookie_secure, # Enforces HTTPS in production; configurable in dev
         samesite="lax",              # Protects against CSRF
         max_age=session_ttl          # Cookie will live for 7 days in the browser
     )
@@ -184,7 +184,7 @@ async def refresh_token(
         key="refresh_token",
         value=new_fresh_token,
         httponly=True,
-        secure=settings.cookie_secure,
+        secure=settings.is_cookie_secure,
         samesite="lax",
         max_age=session_ttl
     )

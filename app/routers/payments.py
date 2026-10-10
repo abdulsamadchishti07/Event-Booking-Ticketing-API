@@ -1,4 +1,5 @@
 import logging
+import uuid
 from decimal import Decimal
 from datetime import datetime, timedelta, timezone
 from typing import Annotated
@@ -90,13 +91,25 @@ def create_payment_intent_for_booking(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="This booking has already been paid and confirmed"
             )
-        # Reusable active pending payment
+        # Reusable active pending payment: verify it has not been cancelled on Stripe
         if existing_payment.status in [
             model.PaymentStatus.REQUIRES_PAYMENT_METHOD,
             model.PaymentStatus.REQUIRES_CONFIRMATION,
             model.PaymentStatus.PROCESSING
         ]:
-            return existing_payment
+            if not existing_payment.stripe_payment_intent_id.startswith("free_"):
+                try:
+                    intent = stripe.PaymentIntent.retrieve(existing_payment.stripe_payment_intent_id)
+                    if intent.status in ["requires_payment_method", "requires_confirmation", "requires_action", "processing"]:
+                        return existing_payment
+                    elif intent.status == "canceled":
+                        existing_payment.status = model.PaymentStatus.CANCELED
+                        db.commit()
+                except Exception as e:
+                    logger.warning(f"Could not retrieve Stripe intent {existing_payment.stripe_payment_intent_id}: {e}")
+                    return existing_payment
+            else:
+                return existing_payment
 
         # If payment had failed (e.g. card declined), reconcile with Stripe
         if existing_payment.status == model.PaymentStatus.FAILED:
@@ -109,6 +122,9 @@ def create_payment_intent_for_booking(
                     db.commit()
                     db.refresh(existing_payment)
                     return existing_payment
+                elif intent.status == "canceled":
+                    existing_payment.status = model.PaymentStatus.CANCELED
+                    db.commit()
             except Exception as e:
                 logger.warning(f"Could not retrieve Stripe intent {existing_payment.stripe_payment_intent_id}: {e}")
 
@@ -125,7 +141,12 @@ def create_payment_intent_for_booking(
     else:
         total_amount = Decimal(booking.service.base_price) * booking.quantity
 
-    idempotency_key = f"booking_{booking.id}" if not existing_payment else f"booking_{booking.id}_retry"
+    if not existing_payment:
+        idempotency_key = f"booking_{booking.id}"
+    else:
+        # Create a new, uniquely identified retry attempt to avoid reusing a cancelled intent on Stripe
+        retry_token = uuid.uuid4().hex[:8]
+        idempotency_key = f"booking_{booking.id}_attempt_{retry_token}"
 
     # 7. Free Event Handling: auto-confirm without calling Stripe
     if total_amount <= Decimal("0.00"):
@@ -272,7 +293,15 @@ async def stripe_webhook(
     if not payment:
         return {"status": "untracked_intent", "event": event_type}
 
-    booking = payment.booking
+    # Lock booking row with PostgreSQL pessimistic lock to coordinate with sweeper
+    booking = (
+        db.query(model.Booking)
+        .filter(model.Booking.id == payment.booking_id)
+        .with_for_update()
+        .first()
+        if payment.booking_id
+        else None
+    )
 
     # 3. Handle payment_intent.succeeded
     if event_type == "payment_intent.succeeded":
@@ -280,10 +309,22 @@ async def stripe_webhook(
         if payment.status == model.PaymentStatus.SUCCEEDED:
             return {"status": "already_processed"}
 
-        # Prevent double-selling seats: if booking was already cancelled or swept, auto-refund!
-        if booking and booking.status == model.BookingStatus.CANCELLED:
+        now = datetime.now(timezone.utc)
+        hold_expiry = (booking.created_at + timedelta(minutes=HOLD_DURATION_MINUTES)) if booking else None
+        is_hold_expired = (now > hold_expiry) if hold_expiry else True
+
+        # Before confirming, independently verify booking is still PENDING and hold has not expired!
+        if not booking or booking.status != model.BookingStatus.PENDING or is_hold_expired:
+            # Hold has expired or booking was cancelled: DO NOT confirm!
+            if booking:
+                booking.status = model.BookingStatus.CANCELLED
+                # Free reserved seats back to available immediately
+                for unit in booking.assigned_units:
+                    unit.status = model.ItemStatus.AVAILABLE
+
             payment.status = model.PaymentStatus.CANCELED
             db.commit()
+
             try:
                 stripe.Refund.create(
                     payment_intent=payment_intent_id,
@@ -292,7 +333,13 @@ async def stripe_webhook(
                     idempotency_key=f"auto_refund_{payment_intent_id}"
                 )
             except Exception as e:
-                logger.error(f"Auto-refund failed for cancelled booking {booking.id}: {e}")
+                logger.error(f"Auto-refund failed for expired/cancelled booking {booking.id if booking else 'unknown'}: {e}")
+                # Raise 500 error so Stripe automatically retries the webhook delivery until refund succeeds!
+                raise HTTPException(
+                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                    detail=f"Auto-refund processing failed: {str(e)}. Webhook will be retried."
+                )
+
             return {"status": "auto_refunded_cancelled_booking", "event": event_type}
 
         payment.status = model.PaymentStatus.SUCCEEDED

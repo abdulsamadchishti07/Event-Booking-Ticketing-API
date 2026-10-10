@@ -15,27 +15,90 @@ async def get_redis() -> aioredis.Redis:
     return redis_client
 
 
-TRUSTED_PROXIES = {"127.0.0.1", "::1", "localhost", "testclient"}
+import ipaddress
+import logging
+
+logger = logging.getLogger(__name__)
+
+
+def parse_trusted_proxies(proxy_conf: str) -> tuple[set[str], list[ipaddress.IPv4Network | ipaddress.IPv6Network]]:
+    hostnames = set()
+    networks = []
+    for item in proxy_conf.split(","):
+        clean_item = item.strip()
+        if not clean_item:
+            continue
+        try:
+            if "/" in clean_item:
+                networks.append(ipaddress.ip_network(clean_item, strict=False))
+            else:
+                addr = ipaddress.ip_address(clean_item)
+                networks.append(ipaddress.ip_network(f"{addr}/{32 if addr.version == 4 else 128}"))
+        except ValueError:
+            hostnames.add(clean_item.lower())
+    return hostnames, networks
+
+
+TRUSTED_HOSTNAMES, TRUSTED_NETWORKS = parse_trusted_proxies(settings.trusted_proxies)
+
+
+def is_trusted_proxy(ip_or_host: str | None) -> bool:
+    if not ip_or_host:
+        return False
+    clean = ip_or_host.strip().lower()
+    if clean in TRUSTED_HOSTNAMES:
+        return True
+    try:
+        addr = ipaddress.ip_address(clean)
+        return any(addr in net for net in TRUSTED_NETWORKS)
+    except ValueError:
+        return False
 
 
 def get_client_ip(request: Request) -> str:
     """
-    Safely extracts client IP for rate-limiting.
-    Only trusts X-Forwarded-For header when the direct connection originates
-    from a trusted reverse proxy or localhost, preventing untrusted clients from
-    spoofing headers to bypass rate limits.
+    Safely extracts and validates client IP for rate-limiting.
+    - If direct connection is not from a trusted proxy, ignores X-Forwarded-For entirely.
+    - If direct connection is a trusted proxy, parses X-Forwarded-For chain from right to left,
+      validating all IP addresses with ipaddress.ip_address and returning the first untrusted client IP.
     """
     client_host = request.client.host if request.client else None
-    if client_host in TRUSTED_PROXIES:
-        forwarded = request.headers.get("X-Forwarded-For")
-        if forwarded:
-            return forwarded.split(",")[0].strip()
-        return client_host or "127.0.0.1"
+    if not client_host:
+        return "127.0.0.1"
 
-    if client_host:
+    # Direct client is not a trusted proxy: do not trust forwarding headers
+    if not is_trusted_proxy(client_host):
+        try:
+            return str(ipaddress.ip_address(client_host))
+        except ValueError:
+            return client_host
+
+    # Direct client is trusted proxy: walk X-Forwarded-For from right to left
+    forwarded = request.headers.get("X-Forwarded-For")
+    if not forwarded:
         return client_host
 
-    return "127.0.0.1"
+    raw_ips = [part.strip() for part in forwarded.split(",") if part.strip()]
+    if not raw_ips:
+        return client_host
+
+    valid_ips = []
+    for ip_str in raw_ips:
+        try:
+            valid_ips.append(str(ipaddress.ip_address(ip_str)))
+        except ValueError:
+            continue
+
+    if not valid_ips:
+        return client_host
+
+    # Walk from right to left: skip trusted proxies in chain, return the first untrusted IP
+    for ip in reversed(valid_ips):
+        if not is_trusted_proxy(ip):
+            return ip
+
+    # If all IPs in chain are trusted, return the leftmost valid client IP
+    return valid_ips[0]
 
 
 class IPRateLimiting:

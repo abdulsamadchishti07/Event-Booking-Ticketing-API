@@ -409,3 +409,188 @@ async def test_services_update_and_delete(
     # Verify deleted
     get_res = await client.get(f"/services/{srv_id}")
     assert get_res.status_code == 404
+
+
+# ==========================================================
+# 10. Bug A: Webhook on expired hold booking triggers auto-refund and seat release
+# ==========================================================
+async def test_webhook_auto_refunds_expired_hold_booking(
+    client: httpx.AsyncClient,
+    seller_headers: dict[str, str],
+    user_headers: dict[str, str],
+    db_session: Session
+):
+    """If payment succeeds on an expired pending hold, webhook auto-refunds and cancels."""
+    now = datetime.now(timezone.utc)
+    loc_res = await client.post(
+        "/locations",
+        headers=seller_headers,
+        json={"city": "Quetta", "country": "Pakistan", "address_line": "Hall Expired"}
+    )
+    loc_id = loc_res.json()["id"]
+
+    srv_res = await client.post(
+        "/services",
+        headers=seller_headers,
+        json={
+            "service_name": "Late Payment Event",
+            "location_id": loc_id,
+            "booking_mode": "unit_assigned",
+            "base_price": 50.00,
+            "start_time": (now + timedelta(days=5)).isoformat(),
+            "end_time": (now + timedelta(days=5, hours=3)).isoformat()
+        }
+    )
+    srv_id = srv_res.json()["id"]
+
+    tier_res = await client.post(
+        f"/services/{srv_id}/tiers",
+        headers=seller_headers,
+        json={"name": "VIP", "price": 50.00}
+    )
+    tier_id = tier_res.json()["id"]
+
+    inv_res = await client.post(
+        f"/services/{srv_id}/inventory/bulk",
+        headers=seller_headers,
+        json={"tier_id": tier_id, "identifier_codes": ["EXP-1"]}
+    )
+    seat = db_session.query(model.InventoryItems).filter_by(service_id=srv_id, identifier_code="EXP-1").first()
+
+    book_res = await client.post(
+        "/bookings",
+        headers=user_headers,
+        json={"service_id": srv_id, "tier_id": tier_id, "assigned_unit_ids": [seat.id], "quantity": 1}
+    )
+    booking_id = book_res.json()["id"]
+
+    mock_intent = MagicMock()
+    mock_intent.id = "pi_expired_hold_test"
+    mock_intent.client_secret = "secret_exp"
+
+    with patch("stripe.PaymentIntent.create", return_value=mock_intent):
+        await client.post(f"/bookings/{booking_id}/pay", headers=user_headers)
+
+    # Fast forward booking created_at to 15 minutes ago (expired hold)
+    booking = db_session.query(model.Booking).filter_by(id=booking_id).first()
+    booking.created_at = now - timedelta(minutes=15)
+    db_session.commit()
+
+    # Webhook arrives
+    mock_event = {
+        "type": "payment_intent.succeeded",
+        "data": {"object": {"id": "pi_expired_hold_test"}}
+    }
+
+    with patch("stripe.Webhook.construct_event", return_value=mock_event), \
+         patch("stripe.Refund.create") as mock_refund:
+        mock_refund.return_value = MagicMock(id="re_exp_123", status="succeeded")
+
+        wh_res = await client.post(
+            "/webhook/stripe",
+            content=b"{}",
+            headers={"stripe-signature": "valid_sig"}
+        )
+        assert wh_res.status_code == 200
+        assert wh_res.json()["status"] == "auto_refunded_cancelled_booking"
+
+        # Verify auto-refund was triggered
+        mock_refund.assert_called_once()
+
+    # Verify booking is CANCELLED and seat is AVAILABLE
+    db_session.expire_all()
+    booking = db_session.query(model.Booking).filter_by(id=booking_id).first()
+    seat = db_session.query(model.InventoryItems).filter_by(id=seat.id).first()
+    assert booking.status == model.BookingStatus.CANCELLED
+    assert seat.status == model.ItemStatus.AVAILABLE
+
+
+# ==========================================================
+# 11. Bug B: Payment retry creates unique attempt when previous intent cancelled
+# ==========================================================
+async def test_payment_retry_after_cancelled_intent(
+    client: httpx.AsyncClient,
+    seller_headers: dict[str, str],
+    user_headers: dict[str, str],
+    db_session: Session
+):
+    """When a payment intent is cancelled, retrying creates a new attempt key instead of reusing old cancelled intent."""
+    now = datetime.now(timezone.utc)
+    loc_res = await client.post(
+        "/locations",
+        headers=seller_headers,
+        json={"city": "Peshawar", "country": "Pakistan", "address_line": "Hall Retry"}
+    )
+    loc_id = loc_res.json()["id"]
+
+    srv_res = await client.post(
+        "/services",
+        headers=seller_headers,
+        json={
+            "service_name": "Retry Event",
+            "location_id": loc_id,
+            "booking_mode": "slot_capacity",
+            "max_capacity": 50,
+            "base_price": 40.00,
+            "start_time": (now + timedelta(days=2)).isoformat(),
+            "end_time": (now + timedelta(days=2, hours=3)).isoformat()
+        }
+    )
+    srv_id = srv_res.json()["id"]
+
+    book_res = await client.post(
+        "/bookings",
+        headers=user_headers,
+        json={"service_id": srv_id, "quantity": 1}
+    )
+    booking_id = book_res.json()["id"]
+
+    # First attempt creates pi_first
+    mock_first = MagicMock()
+    mock_first.id = "pi_first_attempt"
+    mock_first.client_secret = "secret_first"
+    mock_first.status = "requires_payment_method"
+
+    with patch("stripe.PaymentIntent.create", return_value=mock_first):
+        pay1 = await client.post(f"/bookings/{booking_id}/pay", headers=user_headers)
+        assert pay1.status_code == 200
+        assert pay1.json()["stripe_payment_intent_id"] == "pi_first_attempt"
+
+    # Now simulate intent became canceled on Stripe
+    mock_cancelled = MagicMock()
+    mock_cancelled.status = "canceled"
+
+    mock_second = MagicMock()
+    mock_second.id = "pi_second_attempt"
+    mock_second.client_secret = "secret_second"
+
+    with patch("stripe.PaymentIntent.retrieve", return_value=mock_cancelled), \
+         patch("stripe.PaymentIntent.create", return_value=mock_second) as mock_create:
+        pay2 = await client.post(f"/bookings/{booking_id}/pay", headers=user_headers)
+        assert pay2.status_code == 200
+        assert pay2.json()["stripe_payment_intent_id"] == "pi_second_attempt"
+
+        # Verify a new attempt key was generated
+        _, kwargs = mock_create.call_args
+        assert "attempt_" in kwargs["idempotency_key"]
+
+
+# ==========================================================
+# 12. Bug D: Production cookie security flag
+# ==========================================================
+async def test_cookie_secure_enforced_in_production(
+    client: httpx.AsyncClient,
+    test_user: model.User,
+    monkeypatch
+):
+    """When environment is production, response cookies have secure=True."""
+    from app.core.config import settings
+    monkeypatch.setattr(settings, "environment", "production")
+
+    login_resp = await client.post(
+        "/login",
+        data={"username": test_user.email, "password": test_user.plain_password}
+    )
+    assert login_resp.status_code == 200
+    cookie_header = login_resp.headers.get("set-cookie", "")
+    assert "secure" in cookie_header.lower()

@@ -13,7 +13,21 @@ class Settings(BaseSettings):
     algorithm: str
     access_token_expire_minutes: int = 30
     refresh_token_expire_days: int = 7
+    # Environment & Cookie Security
+    environment: str = "development"
     cookie_secure: bool = False
+
+    @property
+    def is_cookie_secure(self) -> bool:
+        """
+        Enforces secure cookies in production, while allowing local dev/testing over HTTP.
+        """
+        if self.environment.lower() == "production":
+            return True
+        return self.cookie_secure
+
+    # Trusted Proxies (CIDR ranges / hostnames for secure rate limiting)
+    trusted_proxies: str = "127.0.0.1,::1,localhost,testclient,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16"
 
     # Reservation hold duration
     HOLD_DURATION_MINUTES: int = 10
