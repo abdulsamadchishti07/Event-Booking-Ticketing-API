@@ -11,7 +11,7 @@
 | :---------------------- | :---------------------------------------------------------------- | :------------------------------------------------------------------------ |
 | **Framework**           | **FastAPI** (Python 3.12+ via `uv`)                               | High-performance asynchronous REST API                                    |
 | **Database**            | **PostgreSQL** + **SQLAlchemy 2.0** + **Alembic**                 | Relational DB with strict constraints, Mapped ORM, migrations             |
-| **Authentication**      | **OAuth2**, **Argon2id** (`pwdlib`), **JWT** (`python-jose`)      | Secure passwords, short-lived Access Tokens, stateless verification       |
+| **Authentication**      | **OAuth2**, **Argon2id** (`pwdlib`), **JWT** (`PyJWT`)           | Secure passwords, short-lived Access Tokens, stateless verification       |
 | **Cache & Sessions**    | **Redis** (`redis.asyncio`)                                       | Sliding session storage (Refresh Tokens), IP/Email Rate Limiting, caching |
 | **Payments**            | **Stripe API** (PaymentIntents, Webhooks)                         | Payment processing, webhook signature verification, idempotency           |
 | **Concurrency Control** | **PostgreSQL `SELECT FOR UPDATE`** & **Redis Distributed Locks**  | Guaranteed prevention of double-booking under concurrent traffic          |
@@ -512,10 +512,27 @@ However, **a temporary hold is not a sale**. The core challenge of Sprint 4 is t
   - Valid signed webhook payload transitions booking to `confirmed` and seats to `booked`.
   - Tampered or missing `stripe-signature` header gets rejected with `400 Bad Request`.
   - Duplicate webhook delivery is handled idempotently without duplicate invoices or errors.
-  - `payment_intent.payment_failed` cancels booking and releases seats back to `available`.
+  - `payment_intent.payment_failed` records the failure (`status=FAILED`) without cancelling the booking, allowing customer retries until the hold duration expires or the background sweeper runs.
 - **Refund & Cancellation Tests**:
   - Confirmed booking refund calls Stripe Refund API and creates `cancellations` row.
   - Seats return to `available` and can be immediately re-booked by another customer.
+
+---
+
+#### 📐 Design Decisions & Architectural Notes:
+
+1. **Refresh Token Rotation Grace Window (30s)**:
+   - When users open or reload multiple tabs simultaneously, each tab sends an in-flight refresh request using the existing refresh token.
+   - To avoid wiping legitimate user sessions due to benign race conditions between concurrent tabs, a 30-second grace window (`rotated_grace:{user_id}:{jti}`) allows in-flight concurrent requests to succeed.
+   - Any reuse of a stale token within this 30s window receives `401 Unauthorized`. Token replay *after* the 30s window expires (detected via `rotated:{user_id}:{jti}`) is treated as a malicious replay attack and revokes the entire session family for that user.
+
+2. **Redis 7.0+ Requirement**:
+   - Redis 7.0 or newer is mandatory across all environments. The rate limiting and lock expiration logic utilizes `expire(..., nx=True)` which was introduced in Redis 7.0.
+
+3. **Login Lockout Protection**:
+   - Failed login attempts and account locks are tracked by email and client IP (`{email}:{client_ip}`) to prevent an external attacker from locking legitimate users out of their accounts.
+   - Lock status is checked *before* verifying credentials (returning `403 Forbidden` immediately for locked clients).
+   - A global per-email counter with a higher threshold (25 failed attempts) protects against distributed botnet attacks.
 
 ---
 

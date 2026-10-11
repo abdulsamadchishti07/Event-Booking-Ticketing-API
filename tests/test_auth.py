@@ -1,7 +1,7 @@
 import httpx
 import pytest
 import redis.asyncio as aioredis
-from jose import jwt
+import jwt
 
 from app import model, oauth2
 
@@ -149,13 +149,13 @@ async def test_login_lockout_after_5_failures(
     assert await test_redis.get(f"account_locked:{test_user.email}:127.0.0.1") == "locked"
     assert await test_redis.get(f"failed_logins:{test_user.email}:127.0.0.1") is None
 
-    # 6th attempt with WRONG password must still be blocked by lockout guard (403)
-    wrong_resp = await client.post(
+    # 6th attempt with CORRECT password must STILL be blocked by lockout guard (403)
+    correct_resp = await client.post(
         "/login",
-        data={"username": test_user.email, "password": "WrongPassword!"}
+        data={"username": test_user.email, "password": test_user.plain_password}
     )
-    assert wrong_resp.status_code == 403
-    assert "temporarily locked due to multiple failed login attempts" in wrong_resp.json()["detail"]
+    assert correct_resp.status_code == 403
+    assert "temporarily locked due to multiple failed login attempts" in correct_resp.json()["detail"]
 
 
 async def test_login_clears_failed_attempts_on_success(

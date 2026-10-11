@@ -1,5 +1,6 @@
 from typing import Annotated
-from jose import JWTError, jwt
+import jwt
+from jwt.exceptions import PyJWTError
 from fastapi import APIRouter, Depends, HTTPException, status, Response, Request
 from starlette.concurrency import run_in_threadpool
 from fastapi.security import OAuth2PasswordRequestForm
@@ -47,34 +48,57 @@ async def login(
     """
     email_clean = user_credentials.username.strip().lower()
     client_ip = redis_client.get_client_ip(request)
-    lock_key = f"account_locked:{email_clean}:{client_ip}"
-    failed_key = f"failed_logins:{email_clean}:{client_ip}"
+    lock_key_ip = f"account_locked:{email_clean}:{client_ip}"
+    lock_key_email = f"account_locked:{email_clean}"
+    failed_key_ip = f"failed_logins:{email_clean}:{client_ip}"
+    failed_key_email = f"failed_logins:{email_clean}"
 
-    # 1. Find user and verify password in constant-time
+    # 1. Check lock status FIRST before verifying credentials
+    if await redis_client.redis_client.get(lock_key_ip):
+        ttl = await redis_client.redis_client.ttl(lock_key_ip)
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=f"Account is temporarily locked due to multiple failed login attempts. Please try again in {ttl} seconds."
+        )
+    if await redis_client.redis_client.get(lock_key_email):
+        ttl = await redis_client.redis_client.ttl(lock_key_email)
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=f"Account is temporarily locked due to multiple failed login attempts across multiple sources. Please try again in {ttl} seconds."
+        )
+
+    # 2. Find user and verify password in constant-time
     user = await run_in_threadpool(lambda: db.query(model.User).filter(func.lower(model.User.email) == email_clean).first())
     password_to_check = user.password_hash if user else DUMMY_PASSWORD_HASH
     is_valid_password = await run_in_threadpool(utils.verify_password, user_credentials.password, password_to_check)
 
     if not user or not is_valid_password:
-        # Check if this email+IP is currently locked out
-        if await redis_client.redis_client.get(lock_key):
-            ttl = await redis_client.redis_client.ttl(lock_key)
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail=f"Account is temporarily locked due to multiple failed login attempts. Please try again in {ttl} seconds."
-            )
-
-        failed_attempts = await redis_client.redis_client.incr(failed_key)
+        failed_attempts = await redis_client.redis_client.incr(failed_key_ip)
         if failed_attempts == 1:
-            await redis_client.redis_client.expire(failed_key, 900)
-        # 5 consecutive failures = 15-minute lock
+            await redis_client.redis_client.expire(failed_key_ip, 900)
+
+        failed_email = await redis_client.redis_client.incr(failed_key_email)
+        if failed_email == 1:
+            await redis_client.redis_client.expire(failed_key_email, 900)
+
+        # 5 consecutive failures from this IP = 15-minute lock for this IP
         if failed_attempts >= 5:
-            await redis_client.redis_client.set(lock_key, "locked", ex=900)
-            await redis_client.redis_client.delete(failed_key)
+            await redis_client.redis_client.set(lock_key_ip, "locked", ex=900)
+            await redis_client.redis_client.delete(failed_key_ip)
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail="Account has been locked for 15 minutes due to 5 consecutive failed login attempts."
             )
+
+        # 25 failures across all sources for this email = 15-minute distributed brute-force lock
+        if failed_email >= 25:
+            await redis_client.redis_client.set(lock_key_email, "locked", ex=900)
+            await redis_client.redis_client.delete(failed_key_email)
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Account has been locked for 15 minutes due to excessive failed login attempts across multiple sources."
+            )
+
         remaining = 5 - failed_attempts
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
@@ -89,9 +113,10 @@ async def login(
             detail="Please verify your email with the OTP code before logging in."
         )
 
-    # 2. SUCCESSFUL LOGIN: Reset failed counter and lock for this client IP
-    await redis_client.redis_client.delete(failed_key)
-    await redis_client.redis_client.delete(lock_key)
+    # 3. SUCCESSFUL LOGIN: Reset failed counter and lock for this client IP
+    await redis_client.redis_client.delete(failed_key_ip)
+    await redis_client.redis_client.delete(lock_key_ip)
+    await redis_client.redis_client.delete(failed_key_email)
 
 
     # 4. Generate  Access Token
@@ -149,7 +174,7 @@ async def refresh_token(
         token_type: str | None = payload.get("type")
         if not user_id or not jti or token_type != "refresh":
             raise HTTPException(status_code=401, detail="Invalid refresh token")
-    except JWTError:
+    except PyJWTError:
         raise HTTPException(status_code=401, detail="Refresh token expired or invalid. Please log in again.")
 
     # 3. Check Redis & Rotate: Atomically fetch and delete old session
@@ -274,7 +299,7 @@ async def logout(
             if user_id and jti:
                 # Instantly delete the session from Redis!
                 await redis_client.redis_client.delete(f"session:{user_id}:{jti}")
-        except JWTError:
+        except PyJWTError:
             pass  # If token is already invalid, just proceed to delete cookie
 
 

@@ -198,3 +198,23 @@ async def test_reset_password_unlocks_locked_account(
         data={"username": test_user.email, "password": new_password}
     )
     assert login_resp.status_code == 200
+
+
+async def test_reset_password_short_password_rejected(
+    client: httpx.AsyncClient,
+    test_user: model.User,
+    test_redis: aioredis.Redis
+):
+    """
+    Test that reset password enforces min_length=8.
+    """
+    await test_redis.set(f"reset_pwd_otp:{test_user.email}", "123456")
+    resp = await client.post(
+        "/account/reset-password",
+        json={
+            "email": test_user.email,
+            "otp": "123456",
+            "new_password": "short1"  # 6 chars, should be rejected with 422
+        }
+    )
+    assert resp.status_code == 422

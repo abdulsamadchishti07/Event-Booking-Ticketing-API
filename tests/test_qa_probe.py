@@ -119,8 +119,13 @@ async def test_email_case_only_change_is_normalised(client, test_user, user_head
 
 # ---- 9. login lockout is per-email: attacker can lock a victim out ----
 async def test_attacker_cannot_lock_out_victim(client, test_user):
+    attacker_headers = {"X-Forwarded-For": "203.0.113.195"}
     for _ in range(5):
-        await client.post("/login", data={"username": test_user.email, "password": "wrong-guess"})
+        await client.post("/login", data={"username": test_user.email, "password": "wrong-guess"}, headers=attacker_headers)
+    # Attacker's IP is locked even if trying correct password
+    attacker_try = await client.post("/login", data={"username": test_user.email, "password": test_user.plain_password}, headers=attacker_headers)
+    assert attacker_try.status_code == 403, "Attacker IP should be locked"
+    # Legitimate victim from different IP is not locked out
     ok = await client.post("/login", data={"username": test_user.email, "password": test_user.plain_password})
     assert ok.status_code == 200, f"victim locked out for 15 min (status {ok.status_code})"
 

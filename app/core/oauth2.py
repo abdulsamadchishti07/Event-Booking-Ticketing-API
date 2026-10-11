@@ -4,7 +4,8 @@ from typing import Annotated
 
 from fastapi import Depends, HTTPException, status
 from fastapi.security import OAuth2PasswordBearer
-from jose import JWTError, jwt
+import jwt
+from jwt.exceptions import PyJWTError
 from sqlalchemy.orm import Session
 
 from app.database import get_db, model
@@ -88,7 +89,7 @@ async def add_blacklist_token(token: str) -> None:
                     "revoked",
                     ex=3600
                 )
-    except JWTError:
+    except PyJWTError:
         pass  # If the token is already invalid, no need to blacklist
 
 
@@ -101,7 +102,7 @@ async def is_token_blacklisted(token: str) -> bool:
         jti = payload.get("jti")
         if jti and await redis.redis_client.get(f"blacklist:{jti}"):
             return True
-    except JWTError:
+    except PyJWTError:
         pass
     return False
 
@@ -129,7 +130,7 @@ async def get_current_user(
         token_type = payload.get("type")
         if user_id is None or token_type != "access":
             raise credentials_exception
-    except JWTError:
+    except PyJWTError:
         raise credentials_exception
 
     # Fast lookup by jti:
@@ -202,7 +203,7 @@ async def get_optional_current_user(
                 return None
         user = await run_in_threadpool(lambda: db.query(model.User).filter(model.User.id == int(user_id)).first())
         return user if (user and user.is_verified) else None
-    except JWTError:
+    except PyJWTError:
         return None
 
 

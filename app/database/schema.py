@@ -55,7 +55,7 @@ class ForgotPasswordRequest(BaseModel):
 class ResetPasswordRequest(BaseModel):
     email: EmailStr
     otp: str = Field(..., min_length=6, max_length=6, description="6-digit reset code")
-    new_password: str = Field(..., min_length=6, max_length=100, description="New password")
+    new_password: str = Field(..., min_length=8, max_length=100, description="New password")
 
 
 
