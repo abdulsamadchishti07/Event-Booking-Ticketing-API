@@ -22,6 +22,9 @@ oauth2_scheme = OAuth2PasswordBearer(tokenUrl="login")
 oauth2_scheme_optional = OAuth2PasswordBearer(tokenUrl="login", auto_error=False)
 
 
+from starlette.concurrency import run_in_threadpool
+
+
 def create_access_token(data: dict, expires_delta: timedelta | None = None) -> str:
     """
     Creates a signed JWT access token containing the payload data and expiry.
@@ -33,12 +36,13 @@ def create_access_token(data: dict, expires_delta: timedelta | None = None) -> s
         to_encode["jti"] = str(uuid.uuid4())
     to_encode["type"] = "access"
 
+    now_ts = datetime.now(timezone.utc).timestamp()
     if expires_delta:
         expire = datetime.now(timezone.utc) + expires_delta
     else:
         expire = datetime.now(timezone.utc) + timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
 
-    to_encode.update({"exp": expire})
+    to_encode.update({"exp": expire, "iat": now_ts})
     return jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
 
 
@@ -109,6 +113,7 @@ async def get_current_user(
     """
     Dependency that decodes the JWT bearer token, extracts user ID,
     and returns the authenticated User instance.
+    Runs sync DB queries on threadpool to avoid blocking the asyncio event loop.
     """
     credentials_exception = HTTPException(
         status_code=status.HTTP_401_UNAUTHORIZED,
@@ -135,7 +140,18 @@ async def get_current_user(
             headers={"WWW-Authenticate": "Bearer"}
         )
 
-    user = db.query(model.User).filter(model.User.id == int(user_id)).first()
+    # Check user-level revocation timestamp (e.g. on password or email update)
+    user_revoked_at = await redis.redis_client.get(f"user_revoked_at:{user_id}")
+    if user_revoked_at:
+        token_iat = payload.get("iat", 0)
+        if token_iat <= float(user_revoked_at):
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Token has been revoked. Please Login again",
+                headers={"WWW-Authenticate": "Bearer"}
+            )
+
+    user = await run_in_threadpool(lambda: db.query(model.User).filter(model.User.id == int(user_id)).first())
     if user is None:
         raise credentials_exception
 
@@ -179,7 +195,12 @@ async def get_optional_current_user(
             return None
         if jti and await redis.redis_client.get(f"blacklist:{jti}"):
             return None
-        user = db.query(model.User).filter(model.User.id == int(user_id)).first()
+        user_revoked_at = await redis.redis_client.get(f"user_revoked_at:{user_id}")
+        if user_revoked_at:
+            token_iat = payload.get("iat", 0)
+            if token_iat <= float(user_revoked_at):
+                return None
+        user = await run_in_threadpool(lambda: db.query(model.User).filter(model.User.id == int(user_id)).first())
         return user if (user and user.is_verified) else None
     except JWTError:
         return None

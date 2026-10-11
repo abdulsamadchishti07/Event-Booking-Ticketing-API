@@ -70,7 +70,7 @@ class UserBase(BaseModel):
 
 
 class UserCreate(UserBase):
-    password: str = Field(..., min_length=6, max_length=100)
+    password: str = Field(..., min_length=8, max_length=100)
 
 
 class UserUpdate(BaseModel):
@@ -78,8 +78,15 @@ class UserUpdate(BaseModel):
     email: Optional[EmailStr] = None
     dob: Optional[date] = None
     phone_no: Optional[str] = Field(None, max_length=20)
-    password: Optional[str] = Field(None, min_length=6, max_length=100)
+    password: Optional[str] = Field(None, min_length=8, max_length=100)
     current_password: Optional[str] = Field(None, min_length=1, max_length=100)
+
+    @field_validator("name", "email", "dob", mode="before")
+    @classmethod
+    def reject_nulls(cls, v, info):
+        if v is None:
+            raise ValueError(f"{info.field_name} cannot be null")
+        return v
 
 class UserOut(BaseModel):
     id: int
@@ -109,6 +116,13 @@ class SellerProfileUpdate(BaseModel):
     business_name: Optional[str] = Field(None, min_length=1, max_length=50)
     business_desc: Optional[str] = Field(None, max_length=255)
 
+    @field_validator("business_name", mode="before")
+    @classmethod
+    def reject_nulls(cls, v, info):
+        if v is None:
+            raise ValueError(f"{info.field_name} cannot be null")
+        return v
+
 
 class SellerProfileOut(SellerProfileBase):
     id: int
@@ -136,6 +150,13 @@ class LocationUpdate(BaseModel):
     country: Optional[str] = Field(None, min_length=1, max_length=100)
     address_line: Optional[str] = Field(None, min_length=1, max_length=255)
 
+    @field_validator("city", "country", "address_line", mode="before")
+    @classmethod
+    def reject_nulls(cls, v, info):
+        if v is None:
+            raise ValueError(f"{info.field_name} cannot be null")
+        return v
+
 
 class LocationOut(LocationBase):
     id: int
@@ -159,6 +180,13 @@ class ServiceTierCreate(ServiceTierBase):
 class ServiceTierUpdate(BaseModel):
     name: Optional[str] = Field(None, min_length=1, max_length=50)
     price: Optional[Decimal] = Field(None, ge=0, decimal_places=2)
+
+    @field_validator("name", "price", mode="before")
+    @classmethod
+    def reject_nulls(cls, v, info):
+        if v is None:
+            raise ValueError(f"{info.field_name} cannot be null")
+        return v
 
 
 class ServiceTierOut(ServiceTierBase):
@@ -201,6 +229,13 @@ class ServiceUpdate(BaseModel):
     base_price: Optional[Decimal] = Field(None, ge=0, decimal_places=2)
     start_time: Optional[datetime] = None
     end_time: Optional[datetime] = None
+
+    @field_validator("service_name", "start_time", "end_time", "base_price", "location_id", "booking_mode", mode="before")
+    @classmethod
+    def reject_nulls(cls, v, info):
+        if v is None:
+            raise ValueError(f"{info.field_name} cannot be null")
+        return v
 
     @model_validator(mode="after")
     def validate_time_range(self) -> "ServiceUpdate":

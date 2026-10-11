@@ -4,8 +4,14 @@ from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
 
 from app.core.config import settings
 
-# Construct the SQLAlchemy database engine
-engine = create_engine(settings.database_url)
+# Construct the SQLAlchemy database engine with high-concurrency connection pool
+engine = create_engine(
+    settings.database_url,
+    pool_size=25,
+    max_overflow=25,
+    pool_timeout=30,
+    pool_pre_ping=True
+)
 
 # Factory for creating thread-safe database sessions
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)

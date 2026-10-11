@@ -27,7 +27,7 @@
 | **1**  | **Foundations & Relational DB Schema**          |  ✅ **COMPLETED**  | PostgreSQL Schema, ER Diagrams, Alembic Migrations                |
 | **2**  | **Auth, Session Management & Security**         |  ✅ **COMPLETED**  | JWT, Argon2id, Redis Sessions, Rate Limiting, RBAC & Pytest Suite |
 | **3**  | **Event Management & Concurrency-Safe Booking** |  ✅ **COMPLETED**  | Event/Seat CRUD, `SELECT FOR UPDATE`, Race condition prevention   |
-| **4**  | **Stripe Payments & Async Webhooks**            | 🟡 **IN PROGRESS** | PaymentIntents, Webhook signature verification, Invoices, Refunds |
+| **4**  | **Stripe Payments & Async Webhooks**            |  ✅ **COMPLETED**  | PaymentIntents, Webhook signature verification, Invoices, Refunds |
 | **5**  | **Redis Caching & Performance Tuning**          |   ⏳ **PENDING**   | Listing cache, cache invalidation on write, endpoint optimization |
 | **6**  | **Docker, Nginx & Stress Load Testing**         |   ⏳ **PENDING**   | Docker Compose, Nginx reverse proxy, Locust/k6 concurrency tests  |
 
@@ -245,16 +245,16 @@ In this sprint, we build the core business logic of the platform:
   - **10-Minute Hold Creation**:
     - Transitions seats from `available` $\rightarrow$ `reserved`.
     - Inserts `assigns_unit` association records.
-    - Inserts `Booking` record with status `pending` and `expires_at = now() + 10 minutes`.
+    - Inserts `Booking` record with status `pending` and a 10-minute hold window calculated from `created_at`.
     - Commits transaction atomically.
 
 ##### 5. Booking Lifecycle & Automatic Seat Release Engine
 
 - **`GET /bookings/me`**: Customer views their active pending and confirmed bookings.
 - **`GET /bookings/{id}`**: Get specific booking detail (with countdown timer for payment).
-- **`DELETE /bookings/{id}/release`**: Early customer cancellation of a pending reservation hold (instantly returning seats to `available`).
+- **`POST /bookings/{id}/cancel`**: Early customer cancellation of a pending reservation hold or confirmed booking (instantly returning seats to `available`).
 - **Background Hold Sweeper (`release_expired_holds`)**:
-  - Automatically identifies `pending` bookings whose 10-minute hold has elapsed without payment.
+  - Automatically identifies `pending` bookings whose 10-minute hold has elapsed without payment (`created_at + 10m < now`).
   - Transitions `Booking.status` to `cancelled`.
   - Reverts associated `InventoryItems.status` from `reserved` back to `available`.
 
@@ -305,7 +305,7 @@ To build this systematically without getting trapped in debugging loops, we foll
   - Validate: Exactly 1 request succeeds with `201 Created`; 49 requests receive clean `409 Conflict`. Zero deadlocks, zero double-bookings.
 - [x] **Milestone 3.5 — Hold Expiration & Automatic Sweeper (Build-First $\rightarrow$ Test)**:
   - Implement background hold release sweeper function (`release_expired_holds`).
-  - Implement manual release endpoint (`DELETE /bookings/{id}/release`).
+  - Implement cancellation and release endpoint (`POST /bookings/{id}/cancel`).
   - Write lifecycle test: force-expire pending booking $\rightarrow$ run sweeper $\rightarrow$ assert seats return to `available`.
 - [x] **Milestone 3.6 — Public Discovery & Real-Time Seat Map**:
   - Implement `GET /services` (filter by city, date, price, capacity).
@@ -313,7 +313,7 @@ To build this systematically without getting trapped in debugging loops, we foll
 
 ---
 
-#### Automated Test Suite Plan (Pytest) — 88 Tests Passing:
+#### Automated Test Suite Plan (Pytest) — 160 Tests Passing:
 
 - [x] **Concurrency Double-Booking Stress Test (`tests/test_concurrency.py`)**:
   - Sent 50 simultaneous booking requests for Seat #1 using `asyncio.gather`.
@@ -365,7 +365,7 @@ To build this systematically without getting trapped in debugging loops, we foll
 
 ### Sprint 4: Stripe Payment Integration & Webhooks
 
-**Status**: 🟡 **IN PROGRESS (Financial Settlement Engine)**
+**Status**: ✅ **COMPLETED (Financial Settlement Engine)**
 
 #### 🎯 The Core Financial Engineering Challenge:
 
@@ -477,26 +477,26 @@ However, **a temporary hold is not a sale**. The core challenge of Sprint 4 is t
 
 #### 📋 Sprint 4 Implementation Milestones:
 
-- [ ] **Milestone 4.1 — Stripe SDK Setup & Environment Configuration**:
+- [x] **Milestone 4.1 — Stripe SDK Setup & Environment Configuration**:
   - Install `stripe` SDK via uv (`uv add stripe`).
   - Configure `STRIPE_SECRET_KEY`, `STRIPE_PUBLISHABLE_KEY`, `STRIPE_WEBHOOK_SECRET` in `app/config.py` and `.env`.
-- [ ] **Milestone 4.2 — Payment Intent Creation (`POST /bookings/{id}/pay`)**:
+- [x] **Milestone 4.2 — Payment Intent Creation (`POST /bookings/{id}/pay`)**:
   - Implement endpoint in `app/routers/payments.py`.
   - Server-calculated pricing, active hold check, idempotency key generation.
   - Insert pending `Payment` row and return `client_secret`.
-- [ ] **Milestone 4.3 — Cryptographic Webhook Handler (`POST /webhook/stripe`)**:
+- [x] **Milestone 4.3 — Cryptographic Webhook Handler (`POST /webhook/stripe`)**:
   - Read raw `Request.body()`.
   - Verify HMAC signature with `STRIPE_WEBHOOK_SECRET`.
   - Idempotent event dispatcher for `payment_intent.succeeded` & `payment_intent.payment_failed`.
-- [ ] **Milestone 4.4 — State Transitions & Invoice Generation**:
+- [x] **Milestone 4.4 — State Transitions & Invoice Generation**:
   - Transition seats from `reserved` ➔ `booked` on success.
   - Revert seats to `available` on failure.
-  - Generate formatted `Invoice` record.
-- [ ] **Milestone 4.5 — Cancellations & Stripe Refunds (`POST /bookings/{id}/cancel`)**:
+  - Generate formatted `Invoice` record and send confirmation email.
+- [x] **Milestone 4.5 — Cancellations & Stripe Refunds (`POST /bookings/{id}/cancel`)**:
   - Verify cancellation eligibility window.
   - Issue refund via Stripe Refunds API.
   - Release inventory and record in `cancellations`.
-- [ ] **Milestone 4.6 — Automated Mocked Pytest Suite (`tests/test_payments.py`)**:
+- [x] **Milestone 4.6 — Automated Mocked Pytest Suite (`tests/test_payments.py`)**:
   - Mock Stripe API calls and webhook signature generation for offline, 100% deterministic tests.
 
 ---

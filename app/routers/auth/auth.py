@@ -1,6 +1,7 @@
 from typing import Annotated
 from jose import JWTError, jwt
 from fastapi import APIRouter, Depends, HTTPException, status, Response, Request
+from starlette.concurrency import run_in_threadpool
 from fastapi.security import OAuth2PasswordRequestForm
 from sqlalchemy.orm import Session
 from sqlalchemy import func
@@ -63,11 +64,11 @@ async def login(
     )
 
     # 2 Find user by email (OAuth2 specification passes email in the 'username' field)
-    user = db.query(model.User).filter(func.lower(model.User.email) == email_clean).first()
+    user = await run_in_threadpool(lambda: db.query(model.User).filter(func.lower(model.User.email) == email_clean).first())
 
     # Constant-time password check: always execute password verification to prevent user enumeration timing attacks
     password_to_check = user.password_hash if user else DUMMY_PASSWORD_HASH
-    is_valid_password = utils.verify_password(user_credentials.password, password_to_check)
+    is_valid_password = await run_in_threadpool(utils.verify_password, user_credentials.password, password_to_check)
 
     if not user or not is_valid_password:
         failed_key = f"failed_logins:{email_clean}"
@@ -164,17 +165,33 @@ async def refresh_token(
     old_session_key = f"session:{user_id}:{jti}"
     session_exists = await redis_client.redis_client.getdel(old_session_key)
     if not session_exists:
-        # Replay attack detected! Revoke all sessions for this user to protect against token theft!
+        delete_cookie_header = "refresh_token=; Max-Age=0; Path=/; SameSite=lax; HttpOnly"
+        if settings.is_cookie_secure:
+            delete_cookie_header += "; Secure"
+
+        # Check if this JTI was rotated within the grace window (30 seconds) by a concurrent tab
+        grace_session = await redis_client.redis_client.get(f"rotated_grace:{user_id}:{jti}")
+        if grace_session:
+            # Token was already rotated in another tab within the grace window.
+            # Do NOT revoke all sessions! Reject this request without destroying other tabs' sessions.
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Session has expired due to inactivity",
+                headers={"Set-Cookie": delete_cookie_header}
+            )
+
+        # Replay attack detected outside of grace window! Revoke all sessions for this user!
         async for session_key in redis_client.redis_client.scan_iter(f"session:{user_id}:*"):
             await redis_client.redis_client.delete(session_key)
-        response.delete_cookie(key="refresh_token")
+
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Session has expired due to inactivity or was already rotated. Replay detected; all sessions revoked."
+            detail="Session has expired due to inactivity",
+            headers={"Set-Cookie": delete_cookie_header}
         )
 
     # 4. User must still exist and be active
-    user = db.query(model.User).filter(model.User.id == int(user_id)).first()
+    user = await run_in_threadpool(lambda: db.query(model.User).filter(model.User.id == int(user_id)).first())
     if not user or not user.is_verified:
         raise HTTPException(status_code=401, detail="User account not found or unverified")
 
@@ -187,6 +204,13 @@ async def refresh_token(
         f"session:{user.id}:{new_jti}",
         "active",
         ex=session_ttl
+    )
+
+    # 6. Store rotation grace window (30s) so concurrent browser tabs don't cause false positive revoking
+    await redis_client.redis_client.set(
+        f"rotated_grace:{user.id}:{jti}",
+        new_jti,
+        ex=30
     )
 
     # 7. Update the HTTP Cookies with the rotated refresh token
@@ -213,8 +237,16 @@ async def refresh_token(
 async def logout(
     request: Request,
     response: Response,
-    token: Annotated[str | None, Depends(oauth2.oauth2_scheme)] = None,
+    token: Annotated[str | None, Depends(oauth2.oauth2_scheme_optional)] = None,
 ):
+    refresh_token = request.cookies.get("refresh_token")
+    if not token and not refresh_token:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Not authenticated",
+            headers={"WWW-Authenticate": "Bearer"}
+        )
+
     if token:
         if await oauth2.is_token_blacklisted(token):
             raise HTTPException(

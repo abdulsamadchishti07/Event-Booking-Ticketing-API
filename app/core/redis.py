@@ -124,12 +124,12 @@ class IPRateLimiting:
         # construct key containing ratelimit
         redis_key = f"Rate_Limit:{ip}:{end_point}"
 
-        # Atomic Increment inside redis
-        current_hit = await redis.incr(redis_key)
-
-        # set expiration on the 1st hit
-        if current_hit == 1:
-            await redis.expire(redis_key, self.window_seconds)
+        # Atomic Increment & Expire inside Redis via pipeline
+        pipe = redis.pipeline()
+        pipe.incr(redis_key)
+        pipe.expire(redis_key, self.window_seconds, nx=True)
+        res = await pipe.execute()
+        current_hit = res[0]
         
         # Block if it hit max hit
         if current_hit > self.max_requests:
@@ -154,12 +154,12 @@ async def check_email_and_otp_rate_limiting(
     clean_email = email.strip().lower()
     redis_key = f"Rate_limit_Email:{clean_email}:{action}"
 
-    # Atomic Increment
-    current_hits = await redis.incr(redis_key)
-
-    # Set expiration on the 1st hit
-    if current_hits == 1:
-        await redis.expire(redis_key, window_seconds)
+    # Atomic Increment & Expire inside Redis via pipeline
+    pipe = redis.pipeline()
+    pipe.incr(redis_key)
+    pipe.expire(redis_key, window_seconds, nx=True)
+    res = await pipe.execute()
+    current_hits = res[0]
 
     if current_hits > max_request:
         ttl = await redis.ttl(redis_key)

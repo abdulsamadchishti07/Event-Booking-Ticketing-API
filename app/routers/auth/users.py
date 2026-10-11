@@ -7,6 +7,7 @@ from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from app.core import oauth2, redis as redis_client
+from app.core.config import settings
 from app.core import security as utils
 from app.database import get_db, model, schema
 from app.services import email
@@ -196,10 +197,8 @@ async def resend_otp(
 
     user = db.query(model.User).filter(func.lower(model.User.email) == clean_email).first()
     if not user:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"User with email '{clean_email}' does not exist."
-        )
+        # Prevent user enumeration: return generic success message
+        return {"message": "A new verification code has been sent to your email."}
 
     # If already verified, do not send another OTP
     if user.is_verified:
@@ -280,14 +279,16 @@ def get_user_by_id(
 async def update_user(
     id: int,
     user_update: schema.UserUpdate,
+    background_tasks: BackgroundTasks,
     current_user: Annotated[model.User, Depends(oauth2.get_verified_user)],
     db: Session = Depends(get_db)
 ):
     """
     Updates user details for the authenticated user:
     - Verifies ownership (users can only update their own profile)
-    - Checks for email uniqueness if updating email
-    - Securely re-hashes password if provided and revokes active sessions
+    - Checks for email uniqueness if updating email (requires current_password, sends OTP)
+    - Securely re-hashes password if provided (requires current_password)
+    - Revokes active sessions and access tokens on security-sensitive changes
     """
     user_query = db.query(model.User).filter(model.User.id == id)
     user = user_query.first()
@@ -307,11 +308,20 @@ async def update_user(
 
     # Extract only the fields explicitly provided in the request body
     update_data = user_update.model_dump(exclude_unset=True)
+    current_password = update_data.pop("current_password", None)
 
-    # If updating email, ensure it's not already taken by another account
+    email_changed = False
+    password_changed = False
+
+    # If updating email, require current_password, verify uniqueness, and send OTP
     if "email" in update_data and update_data["email"]:
         new_email = update_data["email"].strip().lower()
         if new_email != user.email.lower():
+            if not current_password or not utils.verify_password(current_password, user.password_hash):
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Current password is required and must be correct to change email."
+                )
             email_taken = db.query(model.User).filter(func.lower(model.User.email) == new_email).first()
             if email_taken:
                 raise HTTPException(
@@ -320,6 +330,11 @@ async def update_user(
                 )
             update_data["email"] = new_email
             update_data["is_verified"] = False
+            otp = f"{secrets.randbelow(900000) + 100000}"
+            update_data["verification_otp"] = otp
+            update_data["otp_expires_at"] = datetime.now(timezone.utc) + timedelta(minutes=OTP_EXPIRY_MINUTES)
+            background_tasks.add_task(email.send_otp_email, new_email, otp)
+            email_changed = True
 
     # If updating phone number, ensure uniqueness
     if "phone_no" in update_data and update_data["phone_no"] and update_data["phone_no"] != user.phone_no:
@@ -330,10 +345,8 @@ async def update_user(
                 detail="Phone number is already in use by another account."
             )
 
-    password_changed = False
     # If updating password, require and verify current_password
     if "password" in update_data and update_data["password"]:
-        current_password = update_data.pop("current_password", None)
         if not current_password or not utils.verify_password(current_password, user.password_hash):
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
@@ -341,9 +354,6 @@ async def update_user(
             )
         update_data["password_hash"] = utils.hash(update_data.pop("password"))
         password_changed = True
-    else:
-        update_data.pop("current_password", None)
-
 
     if update_data:
         for key, value in update_data.items():
@@ -351,8 +361,14 @@ async def update_user(
         db.commit()
         db.refresh(user)
 
-    if password_changed:
+    if password_changed or email_changed:
         await redis_client.revoke_all_user_sessions(user.id)
+        now_ts = datetime.now(timezone.utc).timestamp() + 1.0
+        await redis_client.redis_client.set(
+            f"user_revoked_at:{user.id}",
+            now_ts,
+            ex=settings.access_token_expire_minutes * 60
+        )
 
     return user
 

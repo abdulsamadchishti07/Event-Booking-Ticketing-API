@@ -337,7 +337,11 @@ async def test_R14_refresh_token_replay_revokes_session_family(client, test_user
     r1 = await client.post("/refresh")
     assert r1.status_code == 200
 
-    # Attacker replays old cookie
+    # Attacker replays old cookie outside grace window (or after grace window expires)
+    from jose import jwt
+    payload = jwt.decode(old_cookie, oauth2.SECRET_KEY, algorithms=[oauth2.ALGORITHM])
+    await test_redis.delete(f"rotated_grace:{test_user.id}:{payload['jti']}")
+
     client.cookies.set("refresh_token", old_cookie)
     r2 = await client.post("/refresh")
     assert r2.status_code == 401

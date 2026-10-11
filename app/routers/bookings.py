@@ -5,7 +5,7 @@ from fastapi import APIRouter, Depends, status, HTTPException
 from sqlalchemy.orm import Session
 from sqlalchemy import func, or_, and_
 
-from app.core import oauth2
+from app.core import oauth2, redis as redis_client
 from app.core.config import settings
 from app.database import get_db, model, schema
 
@@ -16,6 +16,8 @@ router = APIRouter(
 )
 
 HOLD_DURATION_MINUTES = settings.HOLD_DURATION_MINUTES
+MAX_TICKETS_PER_BOOKING = 10
+MAX_PENDING_HOLDS_PER_USER = 5
 
 
 # ==========================================================
@@ -25,7 +27,15 @@ HOLD_DURATION_MINUTES = settings.HOLD_DURATION_MINUTES
     "",
     status_code=status.HTTP_201_CREATED,
     response_model=schema.BookingOut,
-    summary="Create a 10-minute temporary reservation hold"
+    summary="Create a 10-minute temporary reservation hold",
+    dependencies=[
+        Depends(
+            redis_client.IPRateLimiting(
+                max_requests=60,
+                window_seconds=60
+            )
+        )
+    ]
 )
 def create_booking(
     booking_in: schema.BookingCreate,
@@ -33,6 +43,25 @@ def create_booking(
     db: Session = Depends(get_db)
 ):
     now = datetime.now(timezone.utc)
+
+    # 0. Anti-Hoarding Protections: Cap tickets per booking & active pending holds per user
+    requested_qty = len(booking_in.assigned_unit_ids) if booking_in.assigned_unit_ids else booking_in.quantity
+    if requested_qty > MAX_TICKETS_PER_BOOKING:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Cannot book more than {MAX_TICKETS_PER_BOOKING} tickets per booking"
+        )
+
+    active_user_holds = db.query(model.Booking.id).filter(
+        model.Booking.user_id == current_user.id,
+        model.Booking.status == model.BookingStatus.PENDING,
+        model.Booking.created_at >= now - timedelta(minutes=HOLD_DURATION_MINUTES)
+    ).count()
+    if active_user_holds >= MAX_PENDING_HOLDS_PER_USER:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"You have reached the maximum limit of {MAX_PENDING_HOLDS_PER_USER} active pending reservation holds. Please complete or cancel existing pending bookings."
+        )
 
     # 1. Fetch the service
     service = db.query(model.Services).filter(model.Services.id == booking_in.service_id).first()
@@ -77,11 +106,11 @@ def create_booking(
                 detail="Duplicate seat IDs are not allowed in assigned_unit_ids"
             )
         
-        # PESSIMISTIC LOCK: Lock the exact requested seat rows in PostgreSQL
+        # PESSIMISTIC LOCK: Lock the exact requested seat rows in PostgreSQL ordered deterministically to prevent deadlocks
         seats = db.query(model.InventoryItems).filter(
             model.InventoryItems.id.in_(booking_in.assigned_unit_ids),
             model.InventoryItems.service_id == service.id
-        ).with_for_update().all()
+        ).order_by(model.InventoryItems.id.asc()).with_for_update().all()
 
         # Check if all requested seats exist
         if len(seats) != len(booking_in.assigned_unit_ids):

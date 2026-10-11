@@ -471,9 +471,12 @@ async def test_webhook_auto_refunds_expired_hold_booking(
     with patch("stripe.PaymentIntent.create", return_value=mock_intent):
         await client.post(f"/bookings/{booking_id}/pay", headers=user_headers)
 
-    # Fast forward booking created_at to 15 minutes ago (expired hold)
+    # Fast forward booking created_at to 15 minutes ago (expired hold cancelled by sweeper)
     booking = db_session.query(model.Booking).filter_by(id=booking_id).first()
     booking.created_at = now - timedelta(minutes=15)
+    booking.status = model.BookingStatus.CANCELLED
+    seat = db_session.query(model.InventoryItems).filter_by(id=seat.id).first()
+    seat.status = model.ItemStatus.AVAILABLE
     db_session.commit()
 
     # Webhook arrives
@@ -729,9 +732,10 @@ async def test_duplicate_webhook_already_refunded(
     with patch("stripe.PaymentIntent.create", return_value=mock_intent):
         await client.post(f"/bookings/{booking_id}/pay", headers=user_headers)
 
-    # Fast-forward hold to expired
+    # Fast-forward hold to expired and cancelled by sweeper
     booking = db_session.query(model.Booking).filter_by(id=booking_id).first()
     booking.created_at = now - timedelta(minutes=20)
+    booking.status = model.BookingStatus.CANCELLED
     db_session.commit()
 
     mock_event = {
@@ -808,9 +812,10 @@ async def test_auto_refund_failure_rolls_back_and_returns_500(
     with patch("stripe.PaymentIntent.create", return_value=mock_intent):
         await client.post(f"/bookings/{booking_id}/pay", headers=user_headers)
 
-    # Fast forward hold to expired
+    # Fast forward hold to expired and cancelled by sweeper
     booking = db_session.query(model.Booking).filter_by(id=booking_id).first()
     booking.created_at = now - timedelta(minutes=20)
+    booking.status = model.BookingStatus.CANCELLED
     db_session.commit()
 
     mock_event = {
@@ -837,6 +842,7 @@ async def test_auto_refund_failure_rolls_back_and_returns_500(
 async def test_cancel_booking_inconsistent_payment_record(
     client: httpx.AsyncClient,
     test_user: model.User,
+    seller_user: model.User,
     user_headers: dict[str, str],
     db_session: Session
 ):
@@ -895,7 +901,10 @@ async def test_cancel_booking_inconsistent_payment_record(
     assert "Inconsistent payment record" in cancel_res.json()["detail"]
 
 
-def test_released_expired_holds_with_pessimistic_lock(db_session: Session):
+def test_released_expired_holds_with_pessimistic_lock(
+    seller_user: model.User,
+    db_session: Session
+):
     """Sweeper locks and cancels expired pending bookings and restores inventory."""
     from app.core.tasks import released_expired_holds
 

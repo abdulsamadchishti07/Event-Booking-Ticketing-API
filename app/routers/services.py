@@ -454,7 +454,23 @@ def update_service(
                 detail="Cannot assign a location owned by another seller"
             )
 
-    # 2. Capacity validation: prevent setting null or shrinking below active bookings
+    # 2. Booking mode immutability: cannot change booking_mode if event has bookings or inventory
+    if "booking_mode" in update_data and update_data["booking_mode"] is not None:
+        if update_data["booking_mode"] != service.booking_mode:
+            has_bookings = db.query(model.Booking.id).filter(model.Booking.service_id == service.id).first()
+            if has_bookings:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Cannot change booking_mode on an event with existing bookings"
+                )
+            has_inventory = db.query(model.InventoryItems.id).filter(model.InventoryItems.service_id == service.id).first()
+            if has_inventory:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Cannot change booking_mode on an event with existing inventory"
+                )
+
+    # 3. Capacity validation: prevent setting null or shrinking below active bookings
     if "max_capacity" in update_data:
         new_cap = update_data["max_capacity"]
         if service.booking_mode == model.BookingMode.SLOT_CAPACITY:

@@ -10,7 +10,7 @@ from sqlalchemy.orm import Session
 from sqlalchemy import func
 
 from app.database import get_db, model, schema
-from app.core import oauth2
+from app.core import oauth2, redis as redis_client
 from app.core.config import settings
 from app.services import email
 
@@ -26,11 +26,70 @@ router = APIRouter(
 HOLD_DURATION_MINUTES = settings.HOLD_DURATION_MINUTES
 
 
+def confirm_booking_and_invoice(
+    db: Session,
+    booking: model.Booking | None,
+    payment: model.Payment,
+    background_tasks: BackgroundTasks | None = None
+) -> tuple[model.Payment, model.Invoice]:
+    """
+    Atomic transition of payment to SUCCEEDED and booking to CONFIRMED.
+    Transitions assigned units to BOOKED, generates an immutable Invoice,
+    commits transaction, and dispatches invoice email in background.
+    """
+    payment.status = model.PaymentStatus.SUCCEEDED
+
+    if booking:
+        booking.status = model.BookingStatus.CONFIRMED
+        for unit in booking.assigned_units:
+            unit.status = model.ItemStatus.BOOKED
+
+    existing_invoice = db.query(model.Invoice).filter(
+        model.Invoice.payment_id == payment.id
+    ).first()
+
+    if not existing_invoice:
+        invoice_number = f"INV-{datetime.now(timezone.utc).year}-{payment.id:06d}"
+        invoice = model.Invoice(
+            payment_id=payment.id,
+            invoice_number=invoice_number
+        )
+        db.add(invoice)
+    else:
+        invoice = existing_invoice
+        invoice_number = existing_invoice.invoice_number
+
+    db.commit()
+    db.refresh(payment)
+
+    if background_tasks and booking and booking.user and booking.user.email:
+        background_tasks.add_task(
+            email.send_invoice_email,
+            to_email=booking.user.email,
+            user_name=booking.user.name,
+            invoice_number=invoice_number,
+            event_name=booking.service.service_name if booking.service else "Event Ticket",
+            quantity=booking.quantity,
+            total_amount=str(payment.amount),
+            booking_id=booking.id
+        )
+
+    return payment, invoice
+
+
 @router.post(
     "/bookings/{booking_id}/pay",
     response_model=schema.PaymentOut,
     status_code=status.HTTP_200_OK,
-    summary="Create or retrieve Stripe PaymentIntent for a pending booking"
+    summary="Create or retrieve Stripe PaymentIntent for a pending booking",
+    dependencies=[
+        Depends(
+            redis_client.IPRateLimiting(
+                max_requests=60,
+                window_seconds=60
+            )
+        )
+    ]
 )
 def create_payment_intent_for_booking(
     booking_id: int,
@@ -102,13 +161,8 @@ def create_payment_intent_for_booking(
                 try:
                     intent = stripe.PaymentIntent.retrieve(existing_payment.stripe_payment_intent_id)
                     if intent.status == "succeeded":
-                        # Payment already completed on Stripe! Reconcile immediately and avoid creating second intent
-                        existing_payment.status = model.PaymentStatus.SUCCEEDED
-                        booking.status = model.BookingStatus.CONFIRMED
-                        for unit in booking.assigned_units:
-                            unit.status = model.ItemStatus.BOOKED
-                        db.commit()
-                        db.refresh(existing_payment)
+                        # Payment already completed on Stripe! Reconcile immediately with invoice & email
+                        confirm_booking_and_invoice(db, booking, existing_payment, background_tasks)
                         return existing_payment
                     elif intent.status in ["requires_payment_method", "requires_confirmation", "requires_action", "processing"]:
                         return existing_payment
@@ -126,12 +180,7 @@ def create_payment_intent_for_booking(
             try:
                 intent = stripe.PaymentIntent.retrieve(existing_payment.stripe_payment_intent_id)
                 if intent.status == "succeeded":
-                    existing_payment.status = model.PaymentStatus.SUCCEEDED
-                    booking.status = model.BookingStatus.CONFIRMED
-                    for unit in booking.assigned_units:
-                        unit.status = model.ItemStatus.BOOKED
-                    db.commit()
-                    db.refresh(existing_payment)
+                    confirm_booking_and_invoice(db, booking, existing_payment, background_tasks)
                     return existing_payment
                 # If still open on Stripe, reactivate and return client_secret
                 elif intent.status in ["requires_payment_method", "requires_confirmation", "requires_action"]:
@@ -169,13 +218,8 @@ def create_payment_intent_for_booking(
     # 7. Free Event Handling: auto-confirm without calling Stripe
     if total_amount <= Decimal("0.00"):
         total_amount = Decimal("0.00")
-        booking.status = model.BookingStatus.CONFIRMED
-        for unit in booking.assigned_units:
-            unit.status = model.ItemStatus.BOOKED
-
         if existing_payment:
             existing_payment.amount = Decimal("0.00")
-            existing_payment.status = model.PaymentStatus.SUCCEEDED
             payment = existing_payment
         else:
             payment = model.Payment(
@@ -185,31 +229,12 @@ def create_payment_intent_for_booking(
                 idempotency_key=idempotency_key,
                 amount=total_amount,
                 currency="usd",
-                status=model.PaymentStatus.SUCCEEDED
+                status=model.PaymentStatus.REQUIRES_PAYMENT_METHOD
             )
             db.add(payment)
-        db.flush()
+            db.flush()
 
-        invoice_number = f"INV-{datetime.now(timezone.utc).year}-{payment.id:06d}"
-        invoice = model.Invoice(
-            payment_id=payment.id,
-            invoice_number=invoice_number
-        )
-        db.add(invoice)
-        db.commit()
-        db.refresh(payment)
-
-        if booking.user and booking.user.email:
-            background_tasks.add_task(
-                email.send_invoice_email,
-                to_email=booking.user.email,
-                user_name=booking.user.name,
-                invoice_number=invoice_number,
-                event_name=booking.service.service_name if booking.service else "Event Ticket",
-                quantity=booking.quantity,
-                total_amount=str(payment.amount),
-                booking_id=booking.id
-            )
+        confirm_booking_and_invoice(db, booking, payment, background_tasks)
         return payment
 
     # Convert to integer cents for Stripe (e.g. 20.00 -> 2000)
@@ -333,16 +358,16 @@ async def stripe_webhook(
             if existing_cancellation and existing_cancellation.refund_amount > Decimal("0.00"):
                 return {"status": "already_refunded"}
 
-        now = datetime.now(timezone.utc)
-        hold_expiry = (booking.created_at + timedelta(minutes=HOLD_DURATION_MINUTES)) if booking else None
-        is_hold_expired = (now > hold_expiry) if hold_expiry else True
-
         # Check inventory claim validity
         can_confirm = False
-        if booking and booking.status == model.BookingStatus.PENDING and not is_hold_expired:
+        if booking and booking.status == model.BookingStatus.PENDING:
             if booking.service.booking_mode == model.BookingMode.UNIT_ASSIGNED:
-                # All units must still be in RESERVED status
-                can_confirm = all(unit.status == model.ItemStatus.RESERVED for unit in booking.assigned_units)
+                # If booking is still PENDING and every seat is still RESERVED,
+                # the seats are provably still held for this customer! Confirm regardless of the clock.
+                can_confirm = (
+                    bool(booking.assigned_units) and
+                    all(unit.status == model.ItemStatus.RESERVED for unit in booking.assigned_units)
+                )
             elif booking.service.booking_mode == model.BookingMode.SLOT_CAPACITY:
                 active_booking_count = db.query(func.coalesce(func.sum(model.Booking.quantity), 0)).filter(
                     model.Booking.service_id == booking.service_id,
@@ -395,43 +420,7 @@ async def stripe_webhook(
             db.commit()
             return {"status": "auto_refunded_cancelled_booking", "event": event_type}
 
-        payment.status = model.PaymentStatus.SUCCEEDED
-
-        if booking:
-            booking.status = model.BookingStatus.CONFIRMED
-
-            # Transition seats from 'reserved' to 'booked'
-            for unit in booking.assigned_units:
-                unit.status = model.ItemStatus.BOOKED
-
-        # Auto-generate immutable Invoice
-        existing_invoice = db.query(model.Invoice).filter(
-            model.Invoice.payment_id == payment.id
-        ).first()
-
-        if not existing_invoice:
-            invoice_number = f"INV-{datetime.now(timezone.utc).year}-{payment.id:06d}"
-            invoice = model.Invoice(
-                payment_id=payment.id,
-                invoice_number=invoice_number
-            )
-            db.add(invoice)
-        else:
-            invoice_number = existing_invoice.invoice_number
-        db.commit()
-
-        # Send invoice email in background
-        if booking and booking.user and booking.user.email:
-            background_tasks.add_task(
-                email.send_invoice_email,
-                to_email=booking.user.email,
-                user_name=booking.user.name,
-                invoice_number=invoice_number,
-                event_name=booking.service.service_name if booking.service else "Event Ticket",
-                quantity=booking.quantity,
-                total_amount=str(payment.amount),
-                booking_id=booking.id
-            )
+        confirm_booking_and_invoice(db, booking, payment, background_tasks)
         return {"status": "success", "event": event_type}
 
     # 4. Handle payment_intent.payment_failed

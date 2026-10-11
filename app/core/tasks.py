@@ -47,24 +47,38 @@ def released_expired_holds(db: Session = None):
             if booking_created > expire_threshold:
                 continue
 
+            # Cancel Stripe PaymentIntent if one exists and is pending/active
+            if booking.payment and booking.payment.stripe_payment_intent_id:
+                if (
+                    not booking.payment.stripe_payment_intent_id.startswith("free_")
+                    and booking.payment.status != model.PaymentStatus.CANCELED
+                ):
+                    if booking.payment.status == model.PaymentStatus.SUCCEEDED:
+                        # Paid booking must not be cancelled
+                        continue
+
+                    try:
+                        stripe.PaymentIntent.cancel(booking.payment.stripe_payment_intent_id)
+                        booking.payment.status = model.PaymentStatus.CANCELED
+                    except stripe.error.InvalidRequestError as e:
+                        # If already canceled on Stripe, mark CANCELED and proceed safely
+                        if "already" in str(e).lower() or "canceled" in str(e).lower():
+                            booking.payment.status = model.PaymentStatus.CANCELED
+                        else:
+                            logger.warning(
+                                f"Cannot cancel Stripe intent {booking.payment.stripe_payment_intent_id}: {e}. Skipping booking."
+                            )
+                            continue
+                    except Exception as e:
+                        logger.warning(
+                            f"Failed to cancel Stripe PaymentIntent {booking.payment.stripe_payment_intent_id}: {e}. Skipping booking."
+                        )
+                        continue
+
             booking.status = model.BookingStatus.CANCELLED
 
             for seat in booking.assigned_units:
                 seat.status = model.ItemStatus.AVAILABLE
-
-            # Cancel Stripe PaymentIntent if one exists and is pending
-            if booking.payment and booking.payment.stripe_payment_intent_id:
-                if (
-                    booking.payment.status == model.PaymentStatus.REQUIRES_PAYMENT_METHOD
-                    and not booking.payment.stripe_payment_intent_id.startswith("free_")
-                ):
-                    try:
-                        stripe.PaymentIntent.cancel(booking.payment.stripe_payment_intent_id)
-                        booking.payment.status = model.PaymentStatus.CANCELED
-                    except Exception as e:
-                        logger.warning(
-                            f"Failed to cancel Stripe PaymentIntent {booking.payment.stripe_payment_intent_id}: {e}"
-                        )
 
             db.commit()
 
