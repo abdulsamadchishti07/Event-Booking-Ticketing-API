@@ -15,6 +15,3 @@ postman
 
 #enviorment
 .env
-
-# Archives
-*.zip
