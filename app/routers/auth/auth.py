@@ -34,6 +34,7 @@ DUMMY_PASSWORD_HASH = utils.hash("timing_attack_mitigation_dummy_password")
     ]
 )
 async def login(
+    request: Request,
     response: Response,
     user_credentials: Annotated[OAuth2PasswordRequestForm, Depends()],
     db: Session = Depends(get_db)
@@ -45,33 +46,24 @@ async def login(
     - Generates and returns a signed JWT access token and HttpOnly refresh cookie
     """
     email_clean = user_credentials.username.strip().lower()
+    client_ip = redis_client.get_client_ip(request)
+    lock_key = f"account_locked:{email_clean}:{client_ip}"
+    failed_key = f"failed_logins:{email_clean}:{client_ip}"
 
-    # check if account is temp lock
-    lock_key = f"account_locked:{email_clean}"
-    if await redis_client.redis_client.get(lock_key):
-        ttl = await redis_client.redis_client.ttl(lock_key)
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail=f"Account is temporarily locked due to multiple failed login attempts. Please try again in {ttl} seconds."
-        )
-
-    # 1. Enforce Email Rate Limit (Max 5 attempts in 20 mins = 1200s)
-    await redis_client.check_email_and_otp_rate_limiting(
-        email=email_clean,
-        action="login",
-        max_request=5,
-        window_seconds=1200
-    )
-
-    # 2 Find user by email (OAuth2 specification passes email in the 'username' field)
+    # 1. Find user and verify password in constant-time
     user = await run_in_threadpool(lambda: db.query(model.User).filter(func.lower(model.User.email) == email_clean).first())
-
-    # Constant-time password check: always execute password verification to prevent user enumeration timing attacks
     password_to_check = user.password_hash if user else DUMMY_PASSWORD_HASH
     is_valid_password = await run_in_threadpool(utils.verify_password, user_credentials.password, password_to_check)
 
     if not user or not is_valid_password:
-        failed_key = f"failed_logins:{email_clean}"
+        # Check if this email+IP is currently locked out
+        if await redis_client.redis_client.get(lock_key):
+            ttl = await redis_client.redis_client.ttl(lock_key)
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=f"Account is temporarily locked due to multiple failed login attempts. Please try again in {ttl} seconds."
+            )
+
         failed_attempts = await redis_client.redis_client.incr(failed_key)
         if failed_attempts == 1:
             await redis_client.redis_client.expire(failed_key, 900)
@@ -97,10 +89,9 @@ async def login(
             detail="Please verify your email with the OTP code before logging in."
         )
 
-    # 3. SUCCESSFUL LOGIN: Reset the email counter!
-    # Because they entered the correct password, they are the real user, not an attacker.
-    await redis_client.redis_client.delete(f"failed_logins:{email_clean}")
-    await redis_client.redis_client.delete(f"Rate_limit_Email:{email_clean}:login")
+    # 2. SUCCESSFUL LOGIN: Reset failed counter and lock for this client IP
+    await redis_client.redis_client.delete(failed_key)
+    await redis_client.redis_client.delete(lock_key)
 
 
     # 4. Generate  Access Token
@@ -169,21 +160,31 @@ async def refresh_token(
         if settings.is_cookie_secure:
             delete_cookie_header += "; Secure"
 
-        # Check if this JTI was rotated within the grace window (30 seconds) by a concurrent tab
-        grace_session = await redis_client.redis_client.get(f"rotated_grace:{user_id}:{jti}")
-        if grace_session:
-            # Token was already rotated in another tab within the grace window.
-            # Do NOT revoke all sessions! Reject this request without destroying other tabs' sessions.
+        rotated_marker = await redis_client.redis_client.get(f"rotated:{user_id}:{jti}")
+        if rotated_marker:
+            # Token was previously rotated!
+            # Check if this JTI was rotated within the grace window (30 seconds) by a concurrent tab
+            grace_session = await redis_client.redis_client.get(f"rotated_grace:{user_id}:{jti}")
+            if grace_session:
+                # Token was already rotated in another tab within the grace window.
+                # Do NOT revoke all sessions! Reject this request without destroying other tabs' sessions.
+                raise HTTPException(
+                    status_code=status.HTTP_401_UNAUTHORIZED,
+                    detail="Session has expired due to inactivity",
+                    headers={"Set-Cookie": delete_cookie_header}
+                )
+
+            # Replay attack detected outside of grace window! Revoke all sessions for this user!
+            async for session_key in redis_client.redis_client.scan_iter(f"session:{user_id}:*"):
+                await redis_client.redis_client.delete(session_key)
+
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
                 detail="Session has expired due to inactivity",
                 headers={"Set-Cookie": delete_cookie_header}
             )
 
-        # Replay attack detected outside of grace window! Revoke all sessions for this user!
-        async for session_key in redis_client.redis_client.scan_iter(f"session:{user_id}:*"):
-            await redis_client.redis_client.delete(session_key)
-
+        # Stale token from logout or reset: simply return 401 without wiping other active sessions!
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Session has expired due to inactivity",
@@ -206,7 +207,12 @@ async def refresh_token(
         ex=session_ttl
     )
 
-    # 6. Store rotation grace window (30s) so concurrent browser tabs don't cause false positive revoking
+    # 6. Store rotation record and grace window (30s)
+    await redis_client.redis_client.set(
+        f"rotated:{user.id}:{jti}",
+        new_jti,
+        ex=session_ttl
+    )
     await redis_client.redis_client.set(
         f"rotated_grace:{user.id}:{jti}",
         new_jti,

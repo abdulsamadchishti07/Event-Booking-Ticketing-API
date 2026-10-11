@@ -144,7 +144,7 @@ async def get_current_user(
     user_revoked_at = await redis.redis_client.get(f"user_revoked_at:{user_id}")
     if user_revoked_at:
         token_iat = payload.get("iat", 0)
-        if token_iat <= float(user_revoked_at):
+        if token_iat < float(user_revoked_at):
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
                 detail="Token has been revoked. Please Login again",
@@ -198,7 +198,7 @@ async def get_optional_current_user(
         user_revoked_at = await redis.redis_client.get(f"user_revoked_at:{user_id}")
         if user_revoked_at:
             token_iat = payload.get("iat", 0)
-            if token_iat <= float(user_revoked_at):
+            if token_iat < float(user_revoked_at):
                 return None
         user = await run_in_threadpool(lambda: db.query(model.User).filter(model.User.id == int(user_id)).first())
         return user if (user and user.is_verified) else None

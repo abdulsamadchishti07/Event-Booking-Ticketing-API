@@ -415,6 +415,13 @@ class ReviewUpdate(BaseModel):
     rating: Optional[int] = Field(None, ge=1, le=5)
     comment: Optional[str] = Field(None, max_length=1000)
 
+    @field_validator("rating", mode="before")
+    @classmethod
+    def reject_nulls(cls, v, info):
+        if v is None:
+            raise ValueError(f"{info.field_name} cannot be null")
+        return v
+
 
 class ReviewOut(ReviewBase):
     id: int

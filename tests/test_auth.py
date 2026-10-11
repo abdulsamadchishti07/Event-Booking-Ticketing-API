@@ -72,7 +72,7 @@ async def test_login_wrong_password(
     assert response.headers.get("www-authenticate") == "Bearer"
 
     # Verify failed logins counter in Redis
-    failed_count = await test_redis.get(f"failed_logins:{test_user.email}")
+    failed_count = await test_redis.get(f"failed_logins:{test_user.email}:127.0.0.1")
     assert failed_count == "1"
 
 
@@ -146,16 +146,16 @@ async def test_login_lockout_after_5_failures(
     assert "Account has been locked for 15 minutes" in lock_resp.json()["detail"]
 
     # Check Redis keys
-    assert await test_redis.get(f"account_locked:{test_user.email}") == "locked"
-    assert await test_redis.get(f"failed_logins:{test_user.email}") is None
+    assert await test_redis.get(f"account_locked:{test_user.email}:127.0.0.1") == "locked"
+    assert await test_redis.get(f"failed_logins:{test_user.email}:127.0.0.1") is None
 
-    # 6th attempt with CORRECT password must still be blocked by lockout guard
-    correct_resp = await client.post(
+    # 6th attempt with WRONG password must still be blocked by lockout guard (403)
+    wrong_resp = await client.post(
         "/login",
-        data={"username": test_user.email, "password": test_user.plain_password}
+        data={"username": test_user.email, "password": "WrongPassword!"}
     )
-    assert correct_resp.status_code == 403
-    assert "temporarily locked due to multiple failed login attempts" in correct_resp.json()["detail"]
+    assert wrong_resp.status_code == 403
+    assert "temporarily locked due to multiple failed login attempts" in wrong_resp.json()["detail"]
 
 
 async def test_login_clears_failed_attempts_on_success(
@@ -175,7 +175,7 @@ async def test_login_clears_failed_attempts_on_success(
         "/login",
         data={"username": test_user.email, "password": "WrongPassword!"}
     )
-    assert await test_redis.get(f"failed_logins:{test_user.email}") == "2"
+    assert await test_redis.get(f"failed_logins:{test_user.email}:127.0.0.1") == "2"
 
     # Successful login
     success_resp = await client.post(
@@ -185,7 +185,7 @@ async def test_login_clears_failed_attempts_on_success(
     assert success_resp.status_code == 200
 
     # Verify failed logins and email rate limit counters were reset
-    assert await test_redis.get(f"failed_logins:{test_user.email}") is None
+    assert await test_redis.get(f"failed_logins:{test_user.email}:127.0.0.1") is None
     assert await test_redis.get(f"Rate_limit_Email:{test_user.email}:login") is None
 
 

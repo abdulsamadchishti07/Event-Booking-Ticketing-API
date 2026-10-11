@@ -469,11 +469,21 @@ def update_service(
                     status_code=status.HTTP_400_BAD_REQUEST,
                     detail="Cannot change booking_mode on an event with existing inventory"
                 )
+            if update_data["booking_mode"] == model.BookingMode.SLOT_CAPACITY:
+                new_cap = update_data.get("max_capacity", service.max_capacity)
+                if new_cap is None or new_cap < 1:
+                    raise HTTPException(
+                        status_code=status.HTTP_400_BAD_REQUEST,
+                        detail="max_capacity is required and must be >= 1 when switching to slot_capacity mode"
+                    )
+            elif update_data["booking_mode"] == model.BookingMode.UNIT_ASSIGNED:
+                update_data["max_capacity"] = None
 
     # 3. Capacity validation: prevent setting null or shrinking below active bookings
+    effective_mode = update_data.get("booking_mode", service.booking_mode)
     if "max_capacity" in update_data:
         new_cap = update_data["max_capacity"]
-        if service.booking_mode == model.BookingMode.SLOT_CAPACITY:
+        if effective_mode == model.BookingMode.SLOT_CAPACITY:
             if new_cap is None or new_cap < 1:
                 raise HTTPException(
                     status_code=status.HTTP_400_BAD_REQUEST,
@@ -499,18 +509,32 @@ def update_service(
     start_time = update_data.get("start_time", service.start_time)
     end_time = update_data.get("end_time", service.end_time)
 
+    # Normalize both times to UTC to avoid comparing offset-naive and offset-aware datetimes
+    if start_time is not None:
+        if start_time.tzinfo is None:
+            start_time = start_time.replace(tzinfo=timezone.utc)
+        else:
+            start_time = start_time.astimezone(timezone.utc)
+        if "start_time" in update_data:
+            update_data["start_time"] = start_time
+
+    if end_time is not None:
+        if end_time.tzinfo is None:
+            end_time = end_time.replace(tzinfo=timezone.utc)
+        else:
+            end_time = end_time.astimezone(timezone.utc)
+        if "end_time" in update_data:
+            update_data["end_time"] = end_time
+
     if "start_time" in update_data and update_data["start_time"] is not None:
         now = datetime.now(timezone.utc)
-        check_start = start_time
-        if check_start.tzinfo is None:
-            check_start = check_start.replace(tzinfo=timezone.utc)
-        if check_start < now:
+        if start_time < now:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="Cannot update an event to have a start_time in the past"
             )
 
-    if end_time <= start_time:
+    if start_time is not None and end_time is not None and end_time <= start_time:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="end_time must be strictly after start_time"

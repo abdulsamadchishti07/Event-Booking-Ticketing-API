@@ -61,8 +61,24 @@ def released_expired_holds(db: Session = None):
                         stripe.PaymentIntent.cancel(booking.payment.stripe_payment_intent_id)
                         booking.payment.status = model.PaymentStatus.CANCELED
                     except stripe.error.InvalidRequestError as e:
-                        # If already canceled on Stripe, mark CANCELED and proceed safely
-                        if "already" in str(e).lower() or "canceled" in str(e).lower():
+                        # Check status with retrieve() instead of matching text
+                        is_canceled = False
+                        try:
+                            pi = stripe.PaymentIntent.retrieve(booking.payment.stripe_payment_intent_id)
+                            if getattr(pi, "status", None) == "canceled":
+                                is_canceled = True
+                            elif getattr(pi, "status", None) == "succeeded":
+                                booking.payment.status = model.PaymentStatus.SUCCEEDED
+                                logger.info(
+                                    f"PaymentIntent {booking.payment.stripe_payment_intent_id} actually succeeded. Skipping cancellation."
+                                )
+                                continue
+                            else:
+                                continue
+                        except Exception:
+                            pass
+
+                        if is_canceled:
                             booking.payment.status = model.PaymentStatus.CANCELED
                         else:
                             logger.warning(

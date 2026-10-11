@@ -43,7 +43,7 @@ def send_mail(to_email: str, subject: str, html_content: str) -> None:
         password = settings.email_host_password.replace(" ", "").strip()
 
         # Connect to SMTP server, upgrade to TLS, authenticate, and send
-        with smtplib.SMTP(settings.email_smtp_server, settings.email_smtp_port) as server:
+        with smtplib.SMTP(settings.email_smtp_server, settings.email_smtp_port, timeout=10) as server:
             server.starttls()
             server.login(username, password)
             server.sendmail(settings.default_from_email, to_email, msg.as_string())

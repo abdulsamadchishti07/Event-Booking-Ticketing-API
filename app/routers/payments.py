@@ -6,6 +6,7 @@ from typing import Annotated
 
 import stripe
 from fastapi import APIRouter, Depends, HTTPException, status, Request, Header, BackgroundTasks
+from starlette.concurrency import run_in_threadpool
 from sqlalchemy.orm import Session
 from sqlalchemy import func
 
@@ -332,18 +333,22 @@ async def stripe_webhook(
     payment_intent_id = data_obj.get("id")
 
     # 2. Locate Payment record
-    payment = db.query(model.Payment).filter(model.Payment.stripe_payment_intent_id == payment_intent_id).first()
+    payment = await run_in_threadpool(
+        lambda: db.query(model.Payment).filter(model.Payment.stripe_payment_intent_id == payment_intent_id).first()
+    )
     if not payment:
         return {"status": "untracked_intent", "event": event_type}
 
     # Lock booking row with PostgreSQL pessimistic lock to coordinate with sweeper
-    booking = (
-        db.query(model.Booking)
-        .filter(model.Booking.id == payment.booking_id)
-        .with_for_update()
-        .first()
-        if payment.booking_id
-        else None
+    booking = await run_in_threadpool(
+        lambda: (
+            db.query(model.Booking)
+            .filter(model.Booking.id == payment.booking_id)
+            .with_for_update()
+            .first()
+            if payment.booking_id
+            else None
+        )
     )
 
     # 3. Handle payment_intent.succeeded
@@ -352,9 +357,11 @@ async def stripe_webhook(
         if payment.status == model.PaymentStatus.SUCCEEDED:
             return {"status": "already_processed"}
         if payment.status == model.PaymentStatus.CANCELED:
-            existing_cancellation = db.query(model.Cancellation).filter(
-                model.Cancellation.booking_id == payment.booking_id
-            ).first()
+            existing_cancellation = await run_in_threadpool(
+                lambda: db.query(model.Cancellation).filter(
+                    model.Cancellation.booking_id == payment.booking_id
+                ).first()
+            )
             if existing_cancellation and existing_cancellation.refund_amount > Decimal("0.00"):
                 return {"status": "already_refunded"}
 
@@ -369,17 +376,20 @@ async def stripe_webhook(
                     all(unit.status == model.ItemStatus.RESERVED for unit in booking.assigned_units)
                 )
             elif booking.service.booking_mode == model.BookingMode.SLOT_CAPACITY:
-                active_booking_count = db.query(func.coalesce(func.sum(model.Booking.quantity), 0)).filter(
-                    model.Booking.service_id == booking.service_id,
-                    model.Booking.status.in_([model.BookingStatus.CONFIRMED, model.BookingStatus.PENDING])
-                ).scalar()
+                active_booking_count = await run_in_threadpool(
+                    lambda: db.query(func.coalesce(func.sum(model.Booking.quantity), 0)).filter(
+                        model.Booking.service_id == booking.service_id,
+                        model.Booking.status.in_([model.BookingStatus.CONFIRMED, model.BookingStatus.PENDING])
+                    ).scalar()
+                )
                 can_confirm = active_booking_count <= booking.service.max_capacity
 
         # If booking was cancelled, or inventory was released and taken: DO NOT confirm! Initiate auto-refund.
         if not can_confirm:
             # Execute refund FIRST with deterministic idempotency key BEFORE committing CANCELED state
             try:
-                stripe.Refund.create(
+                await run_in_threadpool(
+                    stripe.Refund.create,
                     payment_intent=payment_intent_id,
                     amount=int(payment.amount * 100),
                     reason="requested_by_customer",
@@ -387,7 +397,7 @@ async def stripe_webhook(
                 )
             except Exception as e:
                 logger.error(f"Auto-refund failed for expired/cancelled booking {booking.id if booking else 'unknown'}: {e}")
-                db.rollback()
+                await run_in_threadpool(db.rollback)
                 # Raise 500 error so Stripe automatically retries the webhook delivery until refund succeeds!
                 raise HTTPException(
                     status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -406,9 +416,11 @@ async def stripe_webhook(
                             unit.status = model.ItemStatus.AVAILABLE
 
                 # Record cancellation audit log if not already recorded
-                existing_cancellation = db.query(model.Cancellation).filter(
-                    model.Cancellation.booking_id == booking.id
-                ).first()
+                existing_cancellation = await run_in_threadpool(
+                    lambda: db.query(model.Cancellation).filter(
+                        model.Cancellation.booking_id == booking.id
+                    ).first()
+                )
                 if not existing_cancellation:
                     cancellation = model.Cancellation(
                         booking_id=booking.id,
@@ -417,10 +429,10 @@ async def stripe_webhook(
                     )
                     db.add(cancellation)
 
-            db.commit()
+            await run_in_threadpool(db.commit)
             return {"status": "auto_refunded_cancelled_booking", "event": event_type}
 
-        confirm_booking_and_invoice(db, booking, payment, background_tasks)
+        await run_in_threadpool(confirm_booking_and_invoice, db, booking, payment, background_tasks)
         return {"status": "success", "event": event_type}
 
     # 4. Handle payment_intent.payment_failed
@@ -434,7 +446,7 @@ async def stripe_webhook(
 
         payment.status = model.PaymentStatus.FAILED
         # Do NOT cancel booking on first card decline; let the hold expire or customer retry
-        db.commit()
+        await run_in_threadpool(db.commit)
         return {"status": "failed_recorded", "event": event_type}
 
     # Unhandled event types acknowledged with 200 OK so Stripe stops retrying

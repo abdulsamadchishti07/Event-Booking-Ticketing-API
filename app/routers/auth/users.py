@@ -4,7 +4,9 @@ from typing import Annotated
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, status, Response
 from sqlalchemy import func
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
+from starlette.concurrency import run_in_threadpool
 
 from app.core import oauth2, redis as redis_client
 from app.core.config import settings
@@ -84,9 +86,16 @@ def create_account(
     )
 
     # Persist user in the database
-    db.add(new_user)
-    db.commit()
-    db.refresh(new_user)
+    try:
+        db.add(new_user)
+        db.commit()
+        db.refresh(new_user)
+    except IntegrityError:
+        db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="A user with this email or phone number already exists."
+        )
 
     # Send verification email asynchronously in the background
     background_tasks.add_task(email.send_otp_email, new_user.email, otp)
@@ -123,11 +132,11 @@ async def verify_otp(
         window_seconds=300
     )
 
-    user = db.query(model.User).filter(func.lower(model.User.email) == clean_email).first()
+    user = await run_in_threadpool(lambda: db.query(model.User).filter(func.lower(model.User.email) == clean_email).first())
     if not user:
         raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="User with this email does not exist."
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid email or verification code."
         )
 
     # If the user is already verified, inform them immediately
@@ -157,7 +166,7 @@ async def verify_otp(
     user.is_verified = True
     user.verification_otp = None
     user.otp_expires_at = None
-    db.commit()
+    await run_in_threadpool(db.commit)
     
     # Once verified successfully, clear the counter:
     await redis_client.redis_client.delete(f"Rate_limit_Email:{payload.email.strip().lower()}:verify_otp")
@@ -290,8 +299,7 @@ async def update_user(
     - Securely re-hashes password if provided (requires current_password)
     - Revokes active sessions and access tokens on security-sensitive changes
     """
-    user_query = db.query(model.User).filter(model.User.id == id)
-    user = user_query.first()
+    user = await run_in_threadpool(lambda: db.query(model.User).filter(model.User.id == id).first())
 
     if not user:
         raise HTTPException(
@@ -313,22 +321,23 @@ async def update_user(
     email_changed = False
     password_changed = False
 
-    # If updating email, require current_password, verify uniqueness, and send OTP
+    # If updating email, lowercase it, require current_password, verify uniqueness, and send OTP
     if "email" in update_data and update_data["email"]:
-        new_email = update_data["email"].strip().lower()
+        update_data["email"] = update_data["email"].strip().lower()
+        new_email = update_data["email"]
         if new_email != user.email.lower():
-            if not current_password or not utils.verify_password(current_password, user.password_hash):
+            is_valid_curr_pwd = await run_in_threadpool(utils.verify_password, current_password, user.password_hash) if current_password else False
+            if not current_password or not is_valid_curr_pwd:
                 raise HTTPException(
                     status_code=status.HTTP_400_BAD_REQUEST,
                     detail="Current password is required and must be correct to change email."
                 )
-            email_taken = db.query(model.User).filter(func.lower(model.User.email) == new_email).first()
+            email_taken = await run_in_threadpool(lambda: db.query(model.User).filter(func.lower(model.User.email) == new_email).first())
             if email_taken:
                 raise HTTPException(
                     status_code=status.HTTP_409_CONFLICT,
                     detail=f"Email '{new_email}' is already in use by another account."
                 )
-            update_data["email"] = new_email
             update_data["is_verified"] = False
             otp = f"{secrets.randbelow(900000) + 100000}"
             update_data["verification_otp"] = otp
@@ -338,7 +347,7 @@ async def update_user(
 
     # If updating phone number, ensure uniqueness
     if "phone_no" in update_data and update_data["phone_no"] and update_data["phone_no"] != user.phone_no:
-        phone_taken = db.query(model.User).filter(model.User.phone_no == update_data["phone_no"]).first()
+        phone_taken = await run_in_threadpool(lambda: db.query(model.User).filter(model.User.phone_no == update_data["phone_no"]).first())
         if phone_taken:
             raise HTTPException(
                 status_code=status.HTTP_409_CONFLICT,
@@ -347,23 +356,25 @@ async def update_user(
 
     # If updating password, require and verify current_password
     if "password" in update_data and update_data["password"]:
-        if not current_password or not utils.verify_password(current_password, user.password_hash):
+        is_valid_curr_pwd = await run_in_threadpool(utils.verify_password, current_password, user.password_hash) if current_password else False
+        if not current_password or not is_valid_curr_pwd:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="Current password is required and must be correct to change password."
             )
-        update_data["password_hash"] = utils.hash(update_data.pop("password"))
+        hashed_pwd = await run_in_threadpool(utils.hash, update_data.pop("password"))
+        update_data["password_hash"] = hashed_pwd
         password_changed = True
 
     if update_data:
         for key, value in update_data.items():
             setattr(user, key, value)
-        db.commit()
-        db.refresh(user)
+        await run_in_threadpool(db.commit)
+        await run_in_threadpool(db.refresh, user)
 
     if password_changed or email_changed:
         await redis_client.revoke_all_user_sessions(user.id)
-        now_ts = datetime.now(timezone.utc).timestamp() + 1.0
+        now_ts = datetime.now(timezone.utc).timestamp()
         await redis_client.redis_client.set(
             f"user_revoked_at:{user.id}",
             now_ts,
@@ -390,7 +401,7 @@ def delete_user(
     Deletes an account:
     - Verifies user exists
     - Ensures user is deleting their own account
-    - Validates no existing bookings block deletion
+    - Validates no existing bookings block deletion (as customer or seller)
     """
     user = db.query(model.User).filter(model.User.id == id).first()
     if not user:
@@ -406,13 +417,24 @@ def delete_user(
             detail="You are not allowed to perform this action."
         )
 
-    # Check for existing bookings
+    # Check for existing bookings as customer
     has_bookings = db.query(model.Booking).filter(model.Booking.user_id == user.id).first()
     if has_bookings:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Cannot delete account with associated bookings. Cancel or complete your bookings first."
         )
+
+    # Check for existing bookings on seller's events
+    if user.seller_profile:
+        seller_event_booking = db.query(model.Booking).join(model.Services).filter(
+            model.Services.seller_id == user.seller_profile.id
+        ).first()
+        if seller_event_booking:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="Cannot delete account: you have active events with associated bookings."
+            )
 
     db.delete(user)
     db.commit()
@@ -505,8 +527,14 @@ async def reset_password(
     user.password_hash = utils.hash(payload.new_password)
     db.commit()
 
-    # 4. Invalidate all active sessions for this user across all devices
+    # 4. Invalidate all active sessions for this user across all devices and revoke existing access tokens
     await redis_client.revoke_all_user_sessions(user.id)
+    now_ts = datetime.now(timezone.utc).timestamp()
+    await redis_client.redis_client.set(
+        f"user_revoked_at:{user.id}",
+        now_ts,
+        ex=settings.access_token_expire_minutes * 60
+    )
 
     # 5. Clean up Redis OTP and unlock account if it was locked out
     await redis_client.redis_client.delete(f"reset_pwd_otp:{clean_email}")

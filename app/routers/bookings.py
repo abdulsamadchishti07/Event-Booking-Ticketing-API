@@ -181,10 +181,10 @@ def create_booking(
             )
         ).scalar()
 
-        if (active_booking_count + booking_in.quantity) > lock_service.max_capacity:
+        if lock_service.max_capacity is None or (active_booking_count + booking_in.quantity) > lock_service.max_capacity:
             raise HTTPException(
                 status_code=status.HTTP_409_CONFLICT,
-                detail=f"Sold out! Only {max(0, lock_service.max_capacity - active_booking_count)} tickets remaining"
+                detail=f"Sold out! Only {max(0, (lock_service.max_capacity or 0) - active_booking_count)} tickets remaining"
             )
 
         new_booking = model.Booking(

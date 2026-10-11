@@ -184,4 +184,10 @@ def downgrade() -> None:
     op.drop_table('seller_profiles')
     op.drop_index(op.f('ix_users_email'), table_name='users')
     op.drop_table('users')
+
+    # Drop PostgreSQL enum types created by initial tables
+    sa.Enum(name='payment_status_enum').drop(op.get_bind(), checkfirst=True)
+    sa.Enum(name='item_status_enum').drop(op.get_bind(), checkfirst=True)
+    sa.Enum(name='booking_status_enum').drop(op.get_bind(), checkfirst=True)
+    sa.Enum(name='booking_mode_enum').drop(op.get_bind(), checkfirst=True)
     # ### end Alembic commands ###
