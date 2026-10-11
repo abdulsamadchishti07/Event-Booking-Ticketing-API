@@ -27,7 +27,7 @@ class Settings(BaseSettings):
         return self.cookie_secure
 
     # Trusted Proxies (CIDR ranges / hostnames for secure rate limiting)
-    trusted_proxies: str = "127.0.0.1,::1,localhost,testclient,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16"
+    trusted_proxies: str = "127.0.0.1,::1,localhost,testclient"
 
     # Reservation hold duration
     HOLD_DURATION_MINUTES: int = 10

@@ -594,3 +594,350 @@ async def test_cookie_secure_enforced_in_production(
     assert login_resp.status_code == 200
     cookie_header = login_resp.headers.get("set-cookie", "")
     assert "secure" in cookie_header.lower()
+
+
+# ==========================================================
+# 13. Edge Cases: Out-of-order Webhook Handling
+# ==========================================================
+async def test_out_of_order_webhook_payment_failed_ignored_after_succeeded(
+    client: httpx.AsyncClient,
+    seller_headers: dict[str, str],
+    user_headers: dict[str, str],
+    db_session: Session
+):
+    """A delayed payment_failed event must not overwrite a SUCCEEDED payment."""
+    now = datetime.now(timezone.utc)
+    loc_res = await client.post(
+        "/locations",
+        headers=seller_headers,
+        json={"city": "Islamabad", "country": "Pakistan", "address_line": "Stale Event Hall"}
+    )
+    loc_id = loc_res.json()["id"]
+
+    srv_res = await client.post(
+        "/services",
+        headers=seller_headers,
+        json={
+            "service_name": "Out of order webhook event",
+            "location_id": loc_id,
+            "booking_mode": "slot_capacity",
+            "max_capacity": 50,
+            "base_price": 30.00,
+            "start_time": (now + timedelta(days=2)).isoformat(),
+            "end_time": (now + timedelta(days=2, hours=3)).isoformat()
+        }
+    )
+    srv_id = srv_res.json()["id"]
+
+    book_res = await client.post(
+        "/bookings",
+        headers=user_headers,
+        json={"service_id": srv_id, "quantity": 1}
+    )
+    booking_id = book_res.json()["id"]
+
+    mock_intent = MagicMock()
+    mock_intent.id = "pi_out_of_order_123"
+    mock_intent.client_secret = "secret_ooo"
+
+    with patch("stripe.PaymentIntent.create", return_value=mock_intent):
+        await client.post(f"/bookings/{booking_id}/pay", headers=user_headers)
+
+    # 1. Success event arrives first
+    mock_succeeded_event = {
+        "type": "payment_intent.succeeded",
+        "data": {"object": {"id": "pi_out_of_order_123"}}
+    }
+    with patch("stripe.Webhook.construct_event", return_value=mock_succeeded_event):
+        succ_res = await client.post(
+            "/webhook/stripe",
+            content=b"{}",
+            headers={"stripe-signature": "valid_sig"}
+        )
+        assert succ_res.status_code == 200
+        assert succ_res.json()["status"] == "success"
+
+    # Verify payment is SUCCEEDED and booking CONFIRMED
+    db_session.expire_all()
+    payment = db_session.query(model.Payment).filter_by(stripe_payment_intent_id="pi_out_of_order_123").first()
+    booking = db_session.query(model.Booking).filter_by(id=booking_id).first()
+    assert payment.status == model.PaymentStatus.SUCCEEDED
+    assert booking.status == model.BookingStatus.CONFIRMED
+
+    # 2. Delayed payment_intent.payment_failed event arrives later
+    mock_failed_event = {
+        "type": "payment_intent.payment_failed",
+        "data": {"object": {"id": "pi_out_of_order_123"}}
+    }
+    with patch("stripe.Webhook.construct_event", return_value=mock_failed_event):
+        fail_res = await client.post(
+            "/webhook/stripe",
+            content=b"{}",
+            headers={"stripe-signature": "valid_sig"}
+        )
+        assert fail_res.status_code == 200
+        assert fail_res.json()["status"] == "ignored_terminal_state"
+
+    # Verify payment remains SUCCEEDED and was NOT overwritten!
+    db_session.expire_all()
+    payment = db_session.query(model.Payment).filter_by(stripe_payment_intent_id="pi_out_of_order_123").first()
+    assert payment.status == model.PaymentStatus.SUCCEEDED
+    assert booking.status == model.BookingStatus.CONFIRMED
+
+
+async def test_duplicate_webhook_already_refunded(
+    client: httpx.AsyncClient,
+    seller_headers: dict[str, str],
+    user_headers: dict[str, str],
+    db_session: Session
+):
+    """When a webhook is redelivered for an already refunded/cancelled payment, it returns already_refunded."""
+    now = datetime.now(timezone.utc)
+    loc_res = await client.post(
+        "/locations",
+        headers=seller_headers,
+        json={"city": "Quetta", "country": "Pakistan", "address_line": "Duplicate Hall"}
+    )
+    loc_id = loc_res.json()["id"]
+
+    srv_res = await client.post(
+        "/services",
+        headers=seller_headers,
+        json={
+            "service_name": "Duplicate Webhook Event",
+            "location_id": loc_id,
+            "booking_mode": "slot_capacity",
+            "max_capacity": 50,
+            "base_price": 20.00,
+            "start_time": (now + timedelta(days=2)).isoformat(),
+            "end_time": (now + timedelta(days=2, hours=3)).isoformat()
+        }
+    )
+    srv_id = srv_res.json()["id"]
+
+    book_res = await client.post(
+        "/bookings",
+        headers=user_headers,
+        json={"service_id": srv_id, "quantity": 1}
+    )
+    booking_id = book_res.json()["id"]
+
+    mock_intent = MagicMock()
+    mock_intent.id = "pi_dup_refund_123"
+    mock_intent.client_secret = "secret_dup"
+
+    with patch("stripe.PaymentIntent.create", return_value=mock_intent):
+        await client.post(f"/bookings/{booking_id}/pay", headers=user_headers)
+
+    # Fast-forward hold to expired
+    booking = db_session.query(model.Booking).filter_by(id=booking_id).first()
+    booking.created_at = now - timedelta(minutes=20)
+    db_session.commit()
+
+    mock_event = {
+        "type": "payment_intent.succeeded",
+        "data": {"object": {"id": "pi_dup_refund_123"}}
+    }
+
+    # First delivery: auto-refunds and marks CANCELED
+    with patch("stripe.Webhook.construct_event", return_value=mock_event), \
+         patch("stripe.Refund.create") as mock_refund:
+        mock_refund.return_value = MagicMock(id="re_dup_1", status="succeeded")
+        res1 = await client.post(
+            "/webhook/stripe",
+            content=b"{}",
+            headers={"stripe-signature": "valid_sig"}
+        )
+        assert res1.status_code == 200
+        assert res1.json()["status"] == "auto_refunded_cancelled_booking"
+
+    # Second duplicate delivery: should acknowledge already_refunded without re-invoking refund
+    with patch("stripe.Webhook.construct_event", return_value=mock_event), \
+         patch("stripe.Refund.create") as mock_refund:
+        res2 = await client.post(
+            "/webhook/stripe",
+            content=b"{}",
+            headers={"stripe-signature": "valid_sig"}
+        )
+        assert res2.status_code == 200
+        assert res2.json()["status"] == "already_refunded"
+        mock_refund.assert_not_called()
+
+
+async def test_auto_refund_failure_rolls_back_and_returns_500(
+    client: httpx.AsyncClient,
+    seller_headers: dict[str, str],
+    user_headers: dict[str, str],
+    db_session: Session
+):
+    """If Stripe Refund.create fails during auto-refund, DB rolls back and webhook returns 500 so Stripe retries."""
+    now = datetime.now(timezone.utc)
+    loc_res = await client.post(
+        "/locations",
+        headers=seller_headers,
+        json={"city": "Multan", "country": "Pakistan", "address_line": "Refund Error Hall"}
+    )
+    loc_id = loc_res.json()["id"]
+
+    srv_res = await client.post(
+        "/services",
+        headers=seller_headers,
+        json={
+            "service_name": "Refund Failure Test",
+            "location_id": loc_id,
+            "booking_mode": "slot_capacity",
+            "max_capacity": 50,
+            "base_price": 50.00,
+            "start_time": (now + timedelta(days=2)).isoformat(),
+            "end_time": (now + timedelta(days=2, hours=3)).isoformat()
+        }
+    )
+    srv_id = srv_res.json()["id"]
+
+    book_res = await client.post(
+        "/bookings",
+        headers=user_headers,
+        json={"service_id": srv_id, "quantity": 1}
+    )
+    booking_id = book_res.json()["id"]
+
+    mock_intent = MagicMock()
+    mock_intent.id = "pi_refund_err_123"
+    mock_intent.client_secret = "secret_re_err"
+
+    with patch("stripe.PaymentIntent.create", return_value=mock_intent):
+        await client.post(f"/bookings/{booking_id}/pay", headers=user_headers)
+
+    # Fast forward hold to expired
+    booking = db_session.query(model.Booking).filter_by(id=booking_id).first()
+    booking.created_at = now - timedelta(minutes=20)
+    db_session.commit()
+
+    mock_event = {
+        "type": "payment_intent.succeeded",
+        "data": {"object": {"id": "pi_refund_err_123"}}
+    }
+
+    # Simulate Stripe Refund API failure
+    with patch("stripe.Webhook.construct_event", return_value=mock_event), \
+         patch("stripe.Refund.create", side_effect=Exception("Stripe API gateway timeout")):
+        wh_res = await client.post(
+            "/webhook/stripe",
+            content=b"{}",
+            headers={"stripe-signature": "valid_sig"}
+        )
+        assert wh_res.status_code == 500
+
+    # Ensure payment record in DB was not left as CANCELED
+    db_session.expire_all()
+    payment = db_session.query(model.Payment).filter_by(stripe_payment_intent_id="pi_refund_err_123").first()
+    assert payment.status != model.PaymentStatus.CANCELED
+
+
+async def test_cancel_booking_inconsistent_payment_record(
+    client: httpx.AsyncClient,
+    test_user: model.User,
+    user_headers: dict[str, str],
+    db_session: Session
+):
+    """Cancelling a paid booking with missing Stripe PaymentIntent ID raises 500 cleanly without AttributeError."""
+    now = datetime.now(timezone.utc)
+    loc = db_session.query(model.Location).first()
+    if not loc:
+        seller_profile = db_session.query(model.SellerProfile).first()
+        loc = model.Location(seller_id=seller_profile.id, city="Lahore", country="Pakistan", address_line="Audit Hall")
+        db_session.add(loc)
+        db_session.commit()
+
+    srv = model.Services(
+        seller_id=loc.seller_id,
+        location_id=loc.id,
+        service_name="Inconsistent Service",
+        start_time=now + timedelta(days=1),
+        end_time=now + timedelta(days=1, hours=2),
+        booking_mode=model.BookingMode.SLOT_CAPACITY,
+        max_capacity=100,
+        base_price=Decimal("50.00")
+    )
+    db_session.add(srv)
+    db_session.commit()
+
+    booking = model.Booking(
+        user_id=test_user.id,
+        service_id=srv.id,
+        quantity=1,
+        start_time=srv.start_time,
+        end_time=srv.end_time,
+        status=model.BookingStatus.CONFIRMED
+    )
+    db_session.add(booking)
+    db_session.commit()
+
+    # Create payment with amount > 0 and simulate an inconsistent record where intent ID is missing
+    payment = model.Payment(
+        booking_id=booking.id,
+        stripe_payment_intent_id="temp_intent_for_test",
+        client_secret="dummy",
+        idempotency_key="dummy_key_inconsistent",
+        amount=Decimal("50.00"),
+        status=model.PaymentStatus.SUCCEEDED
+    )
+    db_session.add(payment)
+    db_session.commit()
+
+    # Clear stripe_payment_intent_id in memory to simulate a corrupted/inconsistent record
+    payment.stripe_payment_intent_id = None
+
+
+    # Cancelling must return 500 due to inconsistent record rather than crashing with unhandled AttributeError
+    cancel_res = await client.post(f"/bookings/{booking.id}/cancel", headers=user_headers)
+    assert cancel_res.status_code == 500
+    assert "Inconsistent payment record" in cancel_res.json()["detail"]
+
+
+def test_released_expired_holds_with_pessimistic_lock(db_session: Session):
+    """Sweeper locks and cancels expired pending bookings and restores inventory."""
+    from app.core.tasks import released_expired_holds
+
+    now = datetime.now(timezone.utc)
+    loc = db_session.query(model.Location).first()
+    if not loc:
+        seller_profile = db_session.query(model.SellerProfile).first()
+        loc = model.Location(seller_id=seller_profile.id, city="Lahore", country="Pakistan", address_line="Sweeper Hall")
+        db_session.add(loc)
+        db_session.commit()
+
+    user = db_session.query(model.User).first()
+
+    srv = model.Services(
+        seller_id=loc.seller_id,
+        location_id=loc.id,
+        service_name="Sweeper Lock Event",
+        start_time=now + timedelta(days=2),
+        end_time=now + timedelta(days=2, hours=2),
+        booking_mode=model.BookingMode.SLOT_CAPACITY,
+        max_capacity=50,
+        base_price=Decimal("15.00")
+    )
+    db_session.add(srv)
+    db_session.commit()
+
+    expired_booking = model.Booking(
+        user_id=user.id,
+        service_id=srv.id,
+        quantity=2,
+        start_time=srv.start_time,
+        end_time=srv.end_time,
+        status=model.BookingStatus.PENDING,
+        created_at=now - timedelta(minutes=25)
+    )
+    db_session.add(expired_booking)
+    db_session.commit()
+
+    released_expired_holds(db=db_session)
+
+    db_session.expire_all()
+    refreshed = db_session.query(model.Booking).filter_by(id=expired_booking.id).first()
+    assert refreshed.status == model.BookingStatus.CANCELLED
+
+

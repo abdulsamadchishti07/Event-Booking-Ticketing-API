@@ -14,6 +14,7 @@ def released_expired_holds(db: Session = None):
     """
     Finds PENDING bookings older than HOLD_DURATION_MINUTES, cancels them,
     returns any assigned seats to AVAILABLE status, and cancels active Stripe PaymentIntents.
+    Acquires pessimistic locks on candidate bookings to prevent races with webhook confirmation.
     """
     close_session = (db is None)
     db = db or SessionLocal()
@@ -22,12 +23,30 @@ def released_expired_holds(db: Session = None):
         now = datetime.now(timezone.utc)
         expire_threshold = now - timedelta(minutes=settings.HOLD_DURATION_MINUTES)
 
-        expired_bookings = db.query(model.Booking).filter(
-            model.Booking.status == model.BookingStatus.PENDING,
-            model.Booking.created_at <= expire_threshold
-        ).all()
+        # 1. Query candidate IDs first
+        candidate_ids = [
+            row[0] for row in db.query(model.Booking.id).filter(
+                model.Booking.status == model.BookingStatus.PENDING,
+                model.Booking.created_at <= expire_threshold
+            ).all()
+        ]
 
-        for booking in expired_bookings:
+        # 2. Process each booking with pessimistic row lock and rechecking
+        for b_id in candidate_ids:
+            booking = db.query(model.Booking).filter(
+                model.Booking.id == b_id
+            ).with_for_update().first()
+
+            # Recheck status and expiry inside locked transaction
+            if not booking or booking.status != model.BookingStatus.PENDING:
+                continue
+
+            booking_created = booking.created_at
+            if booking_created.tzinfo is None:
+                booking_created = booking_created.replace(tzinfo=timezone.utc)
+            if booking_created > expire_threshold:
+                continue
+
             booking.status = model.BookingStatus.CANCELLED
 
             for seat in booking.assigned_units:
@@ -35,7 +54,10 @@ def released_expired_holds(db: Session = None):
 
             # Cancel Stripe PaymentIntent if one exists and is pending
             if booking.payment and booking.payment.stripe_payment_intent_id:
-                if booking.payment.status == model.PaymentStatus.REQUIRES_PAYMENT_METHOD:
+                if (
+                    booking.payment.status == model.PaymentStatus.REQUIRES_PAYMENT_METHOD
+                    and not booking.payment.stripe_payment_intent_id.startswith("free_")
+                ):
                     try:
                         stripe.PaymentIntent.cancel(booking.payment.stripe_payment_intent_id)
                         booking.payment.status = model.PaymentStatus.CANCELED
@@ -44,7 +66,6 @@ def released_expired_holds(db: Session = None):
                             f"Failed to cancel Stripe PaymentIntent {booking.payment.stripe_payment_intent_id}: {e}"
                         )
 
-        if expired_bookings:
             db.commit()
 
     except Exception as e:

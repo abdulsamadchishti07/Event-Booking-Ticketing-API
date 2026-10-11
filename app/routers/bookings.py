@@ -71,6 +71,11 @@ def create_booking(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="assigned_unit_ids are required for unit_assigned booking mode"
             )
+        if len(booking_in.assigned_unit_ids) != len(set(booking_in.assigned_unit_ids)):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Duplicate seat IDs are not allowed in assigned_unit_ids"
+            )
         
         # PESSIMISTIC LOCK: Lock the exact requested seat rows in PostgreSQL
         seats = db.query(model.InventoryItems).filter(

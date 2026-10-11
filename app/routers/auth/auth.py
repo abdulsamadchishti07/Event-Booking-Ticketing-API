@@ -15,6 +15,9 @@ router = APIRouter(
     tags=["Authentication"]
 )
 
+# Constant-time dummy hash for timing attack mitigation during login
+DUMMY_PASSWORD_HASH = utils.hash("timing_attack_mitigation_dummy_password")
+
 
 @router.post(
     "/login",
@@ -62,8 +65,11 @@ async def login(
     # 2 Find user by email (OAuth2 specification passes email in the 'username' field)
     user = db.query(model.User).filter(func.lower(model.User.email) == email_clean).first()
 
-    # Verify password against hash & track failed attempts
-    if not user or not utils.verify_password(user_credentials.password, user.password_hash):
+    # Constant-time password check: always execute password verification to prevent user enumeration timing attacks
+    password_to_check = user.password_hash if user else DUMMY_PASSWORD_HASH
+    is_valid_password = utils.verify_password(user_credentials.password, password_to_check)
+
+    if not user or not is_valid_password:
         failed_key = f"failed_logins:{email_clean}"
         failed_attempts = await redis_client.redis_client.incr(failed_key)
         if failed_attempts == 1:
@@ -158,9 +164,13 @@ async def refresh_token(
     old_session_key = f"session:{user_id}:{jti}"
     session_exists = await redis_client.redis_client.getdel(old_session_key)
     if not session_exists:
+        # Replay attack detected! Revoke all sessions for this user to protect against token theft!
+        async for session_key in redis_client.redis_client.scan_iter(f"session:{user_id}:*"):
+            await redis_client.redis_client.delete(session_key)
+        response.delete_cookie(key="refresh_token")
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Session has expired due to inactivity or was already rotated. Please log in again."
+            detail="Session has expired due to inactivity or was already rotated. Replay detected; all sessions revoked."
         )
 
     # 4. User must still exist and be active
@@ -203,12 +213,18 @@ async def refresh_token(
 async def logout(
     request: Request,
     response: Response,
-    token: Annotated[str, Depends(oauth2.oauth2_scheme)],
-    #  This verifies the user and checks if the token is already blacklisted:
-    current_user: Annotated[model.User, Depends(oauth2.get_current_user)]
+    token: Annotated[str | None, Depends(oauth2.oauth2_scheme)] = None,
 ):
-
-    await oauth2.add_blacklist_token(token)
+    if token:
+        if await oauth2.is_token_blacklisted(token):
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Token has been revoked"
+            )
+        try:
+            await oauth2.add_blacklist_token(token)
+        except Exception:
+            pass
 
     # Read refresh token from cookie
     refresh_token = request.cookies.get("refresh_token")
@@ -222,7 +238,7 @@ async def logout(
                 await redis_client.redis_client.delete(f"session:{user_id}:{jti}")
         except JWTError:
             pass  # If token is already invalid, just proceed to delete cookie
-    
+
 
     # Tell the browser to delete the cookie
     response.delete_cookie(key="refresh_token")

@@ -78,8 +78,28 @@ async def add_blacklist_token(token: str) -> None:
                     "revoked",
                     ex=remaining_seconds
                 )
+            else:
+                await redis.redis_client.set(
+                    f"blacklist:{jti}",
+                    "revoked",
+                    ex=3600
+                )
     except JWTError:
         pass  # If the token is already invalid, no need to blacklist
+
+
+async def is_token_blacklisted(token: str) -> bool:
+    """
+    Checks if a token's JTI is in the Redis revocation blacklist.
+    """
+    try:
+        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM], options={"verify_exp": False})
+        jti = payload.get("jti")
+        if jti and await redis.redis_client.get(f"blacklist:{jti}"):
+            return True
+    except JWTError:
+        pass
+    return False
 
 
 async def get_current_user(

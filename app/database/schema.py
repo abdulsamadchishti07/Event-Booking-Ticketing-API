@@ -79,6 +79,7 @@ class UserUpdate(BaseModel):
     dob: Optional[date] = None
     phone_no: Optional[str] = Field(None, max_length=20)
     password: Optional[str] = Field(None, min_length=6, max_length=100)
+    current_password: Optional[str] = Field(None, min_length=1, max_length=100)
 
 class UserOut(BaseModel):
     id: int

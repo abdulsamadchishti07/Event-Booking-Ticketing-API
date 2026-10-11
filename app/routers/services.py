@@ -1,12 +1,13 @@
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Annotated, List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
-from sqlalchemy import asc, desc, func
+from sqlalchemy import and_, asc, desc, func, or_
 from sqlalchemy.exc import IntegrityError
-from sqlalchemy.orm import Session, joinedload
+from sqlalchemy.orm import Session, joinedload, selectinload
 
 from app.core import oauth2
+from app.core.config import settings
 from app.database import get_db, model, schema
 
 
@@ -36,6 +37,17 @@ def create_services(
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="User does not have a active profile"
+        )
+
+    # Validate event start time is in the future
+    now = datetime.now(timezone.utc)
+    start_time = services_in.start_time
+    if start_time.tzinfo is None:
+        start_time = start_time.replace(tzinfo=timezone.utc)
+    if start_time < now:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Cannot create an event with a start_time in the past"
         )
 
     # Check if venue/location exists
@@ -303,7 +315,11 @@ def search_services(
                 detail="date_from cannot be greater than date_to"
             )
 
-    query = db.query(model.Services).join(model.Location)
+    query = db.query(model.Services).options(
+        joinedload(model.Services.location),
+        joinedload(model.Services.seller),
+        selectinload(model.Services.tiers)
+    ).join(model.Location)
 
     if city:
         query = query.filter(model.Location.city.ilike(f"%{city}%"))
@@ -415,15 +431,69 @@ def update_service(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Service with id {service_id} not found"
         )
-    if service.seller_id != current_user.seller_profile.id and current_user.role != model.UserRole.ADMIN:
+    seller_id = current_user.seller_profile.id if current_user.seller_profile else None
+    if current_user.role != model.UserRole.ADMIN and service.seller_id != seller_id:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Not authorized to modify this service"
         )
 
     update_data = service_update.model_dump(exclude_unset=True)
+
+    # 1. Location validation: prevent hijacking other seller's venue
+    if "location_id" in update_data and update_data["location_id"] is not None:
+        target_loc = db.query(model.Location).filter(model.Location.id == update_data["location_id"]).first()
+        if not target_loc:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Location with id {update_data['location_id']} not found"
+            )
+        if current_user.role != model.UserRole.ADMIN and target_loc.seller_id != seller_id:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Cannot assign a location owned by another seller"
+            )
+
+    # 2. Capacity validation: prevent setting null or shrinking below active bookings
+    if "max_capacity" in update_data:
+        new_cap = update_data["max_capacity"]
+        if service.booking_mode == model.BookingMode.SLOT_CAPACITY:
+            if new_cap is None or new_cap < 1:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="max_capacity cannot be null or less than 1 for slot_capacity mode"
+                )
+            now = datetime.now(timezone.utc)
+            active_count = db.query(func.coalesce(func.sum(model.Booking.quantity), 0)).filter(
+                model.Booking.service_id == service.id,
+                or_(
+                    model.Booking.status == model.BookingStatus.CONFIRMED,
+                    and_(
+                        model.Booking.status == model.BookingStatus.PENDING,
+                        model.Booking.created_at >= now - timedelta(minutes=settings.HOLD_DURATION_MINUTES)
+                    )
+                )
+            ).scalar()
+            if new_cap < active_count:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=f"Cannot reduce capacity to {new_cap}; {active_count} tickets are already booked or held"
+                )
+
     start_time = update_data.get("start_time", service.start_time)
     end_time = update_data.get("end_time", service.end_time)
+
+    if "start_time" in update_data and update_data["start_time"] is not None:
+        now = datetime.now(timezone.utc)
+        check_start = start_time
+        if check_start.tzinfo is None:
+            check_start = check_start.replace(tzinfo=timezone.utc)
+        if check_start < now:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Cannot update an event to have a start_time in the past"
+            )
+
     if end_time <= start_time:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -456,21 +526,21 @@ def delete_service(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Service with id {service_id} not found"
         )
-    if service.seller_id != current_user.seller_profile.id and current_user.role != model.UserRole.ADMIN:
+    seller_id = current_user.seller_profile.id if current_user.seller_profile else None
+    if current_user.role != model.UserRole.ADMIN and service.seller_id != seller_id:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Not authorized to delete this service"
         )
 
-    # Prevent deleting an event that already has confirmed bookings
-    has_confirmed = db.query(model.Booking).filter(
-        model.Booking.service_id == service_id,
-        model.Booking.status == model.BookingStatus.CONFIRMED
+    # Prevent deleting an event that has any existing bookings (pending or confirmed)
+    has_bookings = db.query(model.Booking).filter(
+        model.Booking.service_id == service_id
     ).first()
-    if has_confirmed:
+    if has_bookings:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Cannot delete event with confirmed bookings"
+            detail=f"Cannot delete event with existing {has_bookings.status.value} bookings"
         )
 
     db.delete(service)

@@ -331,10 +331,19 @@ async def update_user(
             )
 
     password_changed = False
-    # Hash new password and map to 'password_hash' column if password was provided
+    # If updating password, require and verify current_password
     if "password" in update_data and update_data["password"]:
+        current_password = update_data.pop("current_password", None)
+        if not current_password or not utils.verify_password(current_password, user.password_hash):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Current password is required and must be correct to change password."
+            )
         update_data["password_hash"] = utils.hash(update_data.pop("password"))
         password_changed = True
+    else:
+        update_data.pop("current_password", None)
+
 
     if update_data:
         for key, value in update_data.items():
