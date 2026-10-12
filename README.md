@@ -95,7 +95,7 @@ uv run uvicorn app.main:app --reload --port 8000
 
 ## 🧪 Testing
 
-Run the comprehensive automated test suite (170+ tests):
+Run the comprehensive automated test suite (171 tests passing):
 
 ```bash
 uv run pytest

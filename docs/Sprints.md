@@ -313,7 +313,7 @@ To build this systematically without getting trapped in debugging loops, we foll
 
 ---
 
-#### Automated Test Suite Plan (Pytest) — 160 Tests Passing:
+#### Automated Test Suite Plan (Pytest) — 171 Tests Passing:
 
 - [x] **Concurrency Double-Booking Stress Test (`tests/test_concurrency.py`)**:
   - Sent 50 simultaneous booking requests for Seat #1 using `asyncio.gather`.
