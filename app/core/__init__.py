@@ -1,4 +1,4 @@
-from . import config, oauth2, redis, security
+from . import cache, config, oauth2, redis, security
 from .config import settings
 from .redis import redis_client
 
@@ -6,6 +6,7 @@ from .redis import redis_client
 utils = security
 
 __all__ = [
+    "cache",
     "config",
     "oauth2",
     "redis",

@@ -41,6 +41,9 @@ class Settings(BaseSettings):
 
     # Redis Settings (Caching & Rate Limiting)
     redis_url: str = "redis://localhost:6379/0"
+    cache_services_ttl: int = 300  # 5 minutes for event discovery listings and details
+    cache_seats_ttl: int = 30      # 30 seconds for live seat maps
+    services_rate_limit: int = 120 # 120 req/minute per IP for discovery endpoints
 
     # Stripe Settings
     STRIPE_SECRET_KEY: str
