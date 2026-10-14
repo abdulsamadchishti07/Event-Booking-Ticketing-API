@@ -5,6 +5,7 @@ from sqlalchemy.orm import Session
 import stripe
 
 from app.database import SessionLocal, model
+from app.core.cache import invalidate_services_cache_sync
 from app.core.config import settings
 
 logger = logging.getLogger(__name__)
@@ -31,6 +32,7 @@ def released_expired_holds(db: Session = None):
             ).all()
         ]
 
+        affected_service_ids = set()
         # 2. Process each booking with pessimistic row lock and rechecking
         for b_id in candidate_ids:
             booking = db.query(model.Booking).filter(
@@ -96,7 +98,11 @@ def released_expired_holds(db: Session = None):
             for seat in booking.assigned_units:
                 seat.status = model.ItemStatus.AVAILABLE
 
+            affected_service_ids.add(booking.service_id)
             db.commit()
+
+        for sid in affected_service_ids:
+            invalidate_services_cache_sync(service_id=sid)
 
     except Exception as e:
         logger.error(f"Error releasing expired holds: {e}", exc_info=True)

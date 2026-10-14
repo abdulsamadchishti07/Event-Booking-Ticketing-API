@@ -152,25 +152,51 @@ async def invalidate_services_cache(
         return 0
 
 
+def _get_sync_redis_client(redis_inst: Optional[aioredis.Redis] = None):
+    import redis as syncredis
+    active = _get_active_redis_client(redis_inst)
+    try:
+        kwargs = active.connection_pool.connection_kwargs
+        host = kwargs.get("host", "localhost")
+        port = kwargs.get("port", 6379)
+        db = kwargs.get("db", 0)
+        password = kwargs.get("password")
+        if password:
+            url = f"redis://:{password}@{host}:{port}/{db}"
+        else:
+            url = f"redis://{host}:{port}/{db}"
+        return syncredis.from_url(url, decode_responses=True)
+    except Exception:
+        return syncredis.from_url(settings.redis_url, decode_responses=True)
+
+
 def invalidate_services_cache_sync(
     service_id: Optional[int] = None,
     redis: Optional[aioredis.Redis] = None
 ) -> int:
     """
     Synchronous wrapper for invalidate_services_cache.
+    Uses a dedicated synchronous Redis client to safely delete keys without loop conflicts.
     Safe to call from background workers, threads, or sync functions (e.g. hold sweeper).
     """
     try:
-        loop = asyncio.get_running_loop()
-    except RuntimeError:
-        loop = None
-
-    if loop and loop.is_running():
-        loop.create_task(invalidate_services_cache(service_id=service_id, redis=redis))
+        sync_client = _get_sync_redis_client(redis)
+        total_deleted = 0
+        if service_id is not None:
+            direct_keys = [
+                make_service_detail_cache_key(service_id),
+                make_service_seats_cache_key(service_id),
+            ]
+            total_deleted += sync_client.delete(*direct_keys)
+            list_keys = list(sync_client.scan_iter(match=f"{CACHE_SERVICES_PREFIX}:list:*", count=100))
+            if list_keys:
+                total_deleted += sync_client.delete(*list_keys)
+        else:
+            all_keys = list(sync_client.scan_iter(match=f"{CACHE_SERVICES_PREFIX}:*", count=100))
+            if all_keys:
+                total_deleted += sync_client.delete(*all_keys)
+        sync_client.close()
+        return total_deleted
+    except Exception as e:
+        logger.warning(f"Sync invalidate_services_cache failed: {e}")
         return 0
-    else:
-        try:
-            return asyncio.run(invalidate_services_cache(service_id=service_id, redis=redis))
-        except Exception as e:
-            logger.warning(f"Sync invalidate_services_cache failed: {e}")
-            return 0

@@ -1,13 +1,25 @@
 from datetime import datetime, timedelta, timezone
+import json
 from typing import Annotated, List, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, Response, status
+import redis.asyncio as aioredis
 from sqlalchemy import and_, asc, desc, func, or_
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, joinedload, selectinload
+from starlette.concurrency import run_in_threadpool
 
 from app.core import oauth2
+from app.core.cache import (
+    get_cached,
+    set_cached,
+    make_services_list_cache_key,
+    make_service_detail_cache_key,
+    make_service_seats_cache_key,
+    invalidate_services_cache,
+)
 from app.core.config import settings
+from app.core.redis import get_redis, IPRateLimiting
 from app.database import get_db, model, schema
 
 
@@ -30,7 +42,9 @@ router = APIRouter(
 def create_services(
     services_in: schema.ServiceCreate,
     current_user: Annotated[model.User, Depends(oauth2.require_seller)],
-    db: Session= Depends(get_db)
+    background_tasks: BackgroundTasks,
+    db: Session = Depends(get_db),
+    redis: aioredis.Redis = Depends(get_redis)
 ):
     # seller has a active  profile
     if not current_user.seller_profile:
@@ -103,6 +117,7 @@ def create_services(
             detail="Could not create service due to database constraint"
         )
 
+    background_tasks.add_task(invalidate_services_cache, redis=redis)
     return new_services
 
 # ==========================================================
@@ -119,7 +134,9 @@ def create_service_tier(
     service_id: int,
     tier_in: schema.ServiceTierCreate,
     current_user: Annotated[model.User, Depends(oauth2.require_seller)],
-    db: Session = Depends(get_db)
+    background_tasks: BackgroundTasks,
+    db: Session = Depends(get_db),
+    redis: aioredis.Redis = Depends(get_redis)
 ):
     # Verifyied Seller
     if not current_user.seller_profile:
@@ -171,6 +188,7 @@ def create_service_tier(
             detail=f"Tier with name '{tier_in.name}' already exists for this service"
         )
 
+    background_tasks.add_task(invalidate_services_cache, service_id=service_id, redis=redis)
     return new_tier
 
 # ==========================================================
@@ -185,7 +203,9 @@ def bulk_create_inventory(
     service_id: int,
     inventory_in: schema.BulkInventoryCreate,
     current_user: Annotated[model.User, Depends(oauth2.require_seller)],
-    db: Session = Depends(get_db)
+    background_tasks: BackgroundTasks,
+    db: Session = Depends(get_db),
+    redis: aioredis.Redis = Depends(get_redis)
 ):
 
     # 1
@@ -258,8 +278,6 @@ def bulk_create_inventory(
 
     try:
         db.add_all(new_items)
-        # if db.add() used it when each time a loop create the seat it has to commit each and everytime in the loop creating the obect took around 1ms if it commit each time it would took 1 to 3 sec on each seats 
-        # But using the add_all it will commit the all the seats in one go. 
         db.commit()
     except IntegrityError:
         db.rollback()
@@ -268,6 +286,7 @@ def bulk_create_inventory(
             detail="One or more identifier codes already exist for this service"
         )
 
+    background_tasks.add_task(invalidate_services_cache, service_id=service_id, redis=redis)
     return {
         "message": f"Successfully created {len(new_items)} inventory items",
         "created_count": len(new_items)
@@ -281,10 +300,19 @@ def bulk_create_inventory(
     "",
     status_code=status.HTTP_200_OK,
     response_model=List[schema.ServiceOut],
-    summary="Public discovery of events"
+    summary="Public discovery of events",
+    dependencies=[
+        Depends(
+            IPRateLimiting(
+                max_requests=settings.services_rate_limit,
+                window_seconds=60
+            )
+        )
+    ]
 )
-def search_services(
+async def search_services(
     db: Session = Depends(get_db),
+    redis: aioredis.Redis = Depends(get_redis),
     city: Optional[str] = None,
     country: Optional[str] = None,
     booking_mode: Optional[model.BookingMode] = None,
@@ -314,6 +342,28 @@ def search_services(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="date_from cannot be greater than date_to"
             )
+
+    cache_key = make_services_list_cache_key(
+        city=city,
+        country=country,
+        booking_mode=booking_mode,
+        min_price=min_price,
+        max_price=max_price,
+        date_from=date_from,
+        date_to=date_to,
+        include_past=include_past,
+        sort_by=sort_by,
+        limit=limit,
+        offset=offset
+    )
+
+    cached_data = await get_cached(cache_key, redis=redis)
+    if cached_data is not None:
+        return Response(
+            content=cached_data,
+            media_type="application/json",
+            headers={"X-Cache": "HIT"}
+        )
 
     query = db.query(model.Services).options(
         joinedload(model.Services.location),
@@ -354,7 +404,22 @@ def search_services(
     else:
         query = query.order_by(asc(model.Services.start_time), asc(model.Services.id))
 
-    return query.offset(offset).limit(limit).all()
+    services = await run_in_threadpool(lambda: query.offset(offset).limit(limit).all())
+
+    serialized = [
+        schema.ServiceOut.model_validate(s).model_dump(mode="json")
+        for s in services
+    ]
+    json_data = json.dumps(serialized)
+
+    await set_cached(cache_key, json_data, ttl=settings.cache_services_ttl, redis=redis)
+
+    return Response(
+        content=json_data,
+        media_type="application/json",
+        headers={"X-Cache": "MISS"}
+    )
+
 
 # ==========================================================
 # 5. Public Discovery: Live Seat Map
@@ -363,13 +428,33 @@ def search_services(
     "/{service_id}/seats",
     status_code=status.HTTP_200_OK,
     response_model=List[schema.InventoryItemOut],
-    summary="Get live seat map for an event"
+    summary="Get live seat map for an event",
+    dependencies=[
+        Depends(
+            IPRateLimiting(
+                max_requests=settings.services_rate_limit,
+                window_seconds=60
+            )
+        )
+    ]
 )
-def get_service_seats(
+async def get_service_seats(
     service_id: int,
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    redis: aioredis.Redis = Depends(get_redis)
 ):
-    service = db.query(model.Services).filter(model.Services.id == service_id).first()
+    cache_key = make_service_seats_cache_key(service_id)
+    cached_data = await get_cached(cache_key, redis=redis)
+    if cached_data is not None:
+        return Response(
+            content=cached_data,
+            media_type="application/json",
+            headers={"X-Cache": "HIT"}
+        )
+
+    service = await run_in_threadpool(
+        lambda: db.query(model.Services).filter(model.Services.id == service_id).first()
+    )
     if not service:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -382,15 +467,29 @@ def get_service_seats(
             detail="Seat maps are only available for unit_assigned events"
         )
 
-    seats = (
-        db.query(model.InventoryItems)
-        .options(joinedload(model.InventoryItems.tier))
-        .filter(model.InventoryItems.service_id == service_id)
-        .order_by(model.InventoryItems.id.asc())
-        .all()
+    seats = await run_in_threadpool(
+        lambda: (
+            db.query(model.InventoryItems)
+            .options(joinedload(model.InventoryItems.tier))
+            .filter(model.InventoryItems.service_id == service_id)
+            .order_by(model.InventoryItems.id.asc())
+            .all()
+        )
     )
 
-    return seats
+    serialized = [
+        schema.InventoryItemOut.model_validate(s).model_dump(mode="json")
+        for s in seats
+    ]
+    json_data = json.dumps(serialized)
+
+    await set_cached(cache_key, json_data, ttl=settings.cache_seats_ttl, redis=redis)
+
+    return Response(
+        content=json_data,
+        media_type="application/json",
+        headers={"X-Cache": "MISS"}
+    )
 
 
 @router.get(
@@ -398,17 +497,48 @@ def get_service_seats(
     response_model=schema.ServiceOut,
     summary="Get service/event details by ID"
 )
-def get_service_by_id(
+async def get_service_by_id(
     service_id: int,
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    redis: aioredis.Redis = Depends(get_redis)
 ):
-    service = db.query(model.Services).filter(model.Services.id == service_id).first()
+    cache_key = make_service_detail_cache_key(service_id)
+    cached_data = await get_cached(cache_key, redis=redis)
+    if cached_data is not None:
+        return Response(
+            content=cached_data,
+            media_type="application/json",
+            headers={"X-Cache": "HIT"}
+        )
+
+    service = await run_in_threadpool(
+        lambda: (
+            db.query(model.Services)
+            .options(
+                joinedload(model.Services.location),
+                joinedload(model.Services.seller),
+                selectinload(model.Services.tiers)
+            )
+            .filter(model.Services.id == service_id)
+            .first()
+        )
+    )
     if not service:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Service with id {service_id} not found"
         )
-    return service
+
+    serialized = schema.ServiceOut.model_validate(service).model_dump(mode="json")
+    json_data = json.dumps(serialized)
+
+    await set_cached(cache_key, json_data, ttl=settings.cache_services_ttl, redis=redis)
+
+    return Response(
+        content=json_data,
+        media_type="application/json",
+        headers={"X-Cache": "MISS"}
+    )
 
 
 # ==========================================================
@@ -423,7 +553,9 @@ def update_service(
     service_id: int,
     service_update: schema.ServiceUpdate,
     current_user: Annotated[model.User, Depends(oauth2.require_seller)],
-    db: Session = Depends(get_db)
+    background_tasks: BackgroundTasks,
+    db: Session = Depends(get_db),
+    redis: aioredis.Redis = Depends(get_redis)
 ):
     service = db.query(model.Services).filter(model.Services.id == service_id).first()
     if not service:
@@ -544,6 +676,8 @@ def update_service(
         setattr(service, key, value)
     db.commit()
     db.refresh(service)
+
+    background_tasks.add_task(invalidate_services_cache, service_id=service_id, redis=redis)
     return service
 
 
@@ -558,7 +692,9 @@ def update_service(
 def delete_service(
     service_id: int,
     current_user: Annotated[model.User, Depends(oauth2.require_seller)],
-    db: Session = Depends(get_db)
+    background_tasks: BackgroundTasks,
+    db: Session = Depends(get_db),
+    redis: aioredis.Redis = Depends(get_redis)
 ):
     service = db.query(model.Services).filter(model.Services.id == service_id).first()
     if not service:
@@ -585,5 +721,7 @@ def delete_service(
 
     db.delete(service)
     db.commit()
+
+    background_tasks.add_task(invalidate_services_cache, service_id=service_id, redis=redis)
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 

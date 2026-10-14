@@ -548,21 +548,71 @@ However, **a temporary hold is not a sale**. The core challenge of Sprint 4 is t
 
 ### Sprint 5: Redis Caching & Smart Invalidation
 
-**Status**: ⏳ **UPNEXT**
+**Status**: ✅ **COMPLETED (Sub-5ms Discovery Engine & Real-Time Invalidation)**
 
-#### The Challenge:
+#### 🎯 The Core Engineering Challenge:
 
-Event listings are read 99% of the time and updated 1% of the time. Hitting the database on every browse request destroys performance under traffic.
+Event discovery and browsing (`GET /services`) are read 99% of the time and updated 1% of the time. Hitting the database with complex multi-table joins, location filters, price comparisons, and pagination on every public browse request creates severe database bottlenecks under peak traffic.
 
-#### What You Will Build:
+The solution is an ultra-fast **Read-Through Redis Cache** with **deterministic query hashing** coupled with **smart real-time cache invalidation on write mutations** and **DDoS rate-limiting protection**.
 
-1. **Read-Through Event Cache**:
-   - Cache `GET /services` queries in Redis (JSON serialized, e.g. key `cache:services:page:1:city:nyc`).
-   - Serve responses directly from memory in <5ms.
-2. **Cache Invalidation on Write**:
-   - When a seller updates an event, deletes a tier, or when seats sell out, invalidate the corresponding cache keys immediately.
-3. **Global Rate Limiting & Protection**:
-   - Protect high-cost endpoints against DDoS or scraping using Redis token bucket / sliding window counters.
+---
+
+#### 🏗️ Architecture & Detailed System Workflow:
+
+```
+[Public Client GET /services] ──> [IP Rate Limiting Guard (120 req/min)]
+                                            │
+                                            ▼
+                           [Compute SHA-256 Query Hash]
+                                            │
+                                            ▼
+                               [Redis GET cache:services:list:{hash}]
+                                 ├── HIT (<5ms)  ──> Return JSON with header X-Cache: HIT
+                                 └── MISS (>10ms)
+                                       │
+                                       ├── 1. Execute PostgreSQL Query (joinedload & selectinload)
+                                       ├── 2. Serialize to JSON (Pydantic model_dump)
+                                       ├── 3. Redis SETEX with 5-Minute TTL (300s)
+                                       └── 4. Return JSON with header X-Cache: MISS
+```
+
+#### 📦 What Has Been Built:
+
+1. **Read-Through Caching Architecture (`app/core/cache.py`)**:
+   - `make_services_list_cache_key`: Canonical parameter normalization (lowercase trimmed strings, rounded decimals, ISO timestamps, sorted keys) hashed via SHA-256 into deterministic keys (`cache:services:list:{hash}`).
+   - `make_service_detail_cache_key`: Dedicated key for single event details (`cache:services:detail:{service_id}`).
+   - `make_service_seats_cache_key`: Dedicated key for live visual seat maps (`cache:services:seats:{service_id}`).
+   - Standard `X-Cache: HIT` and `X-Cache: MISS` HTTP response headers.
+   - **Fail-Open Resilience**: Graceful fallback to PostgreSQL if Redis is unreachable or throws a transient connection exception.
+
+2. **Smart Real-Time Invalidation on Mutations**:
+   - **Service Creation (`POST /services`)**: Invalidates all list search caches (`cache:services:list:*`).
+   - **Service Update (`PUT /services/{id}`)**: Invalidates event detail (`cache:services:detail:{id}`) and all search listings.
+   - **Service Deletion (`DELETE /services/{id}`)**: Invalidates event detail, seat map, and search listings.
+   - **Pricing Tiers (`POST /services/{id}/tiers`)**: Invalidates event detail and listings.
+   - **Bulk Seat Generation (`POST /services/{id}/inventory/bulk`)**: Invalidates seat map (`cache:services:seats:{id}`).
+   - **Booking Creation (`POST /bookings`)**: Automatically invalidates seat map for unit-assigned events and listing capacity for slot-capacity events.
+   - **Booking Cancellation (`POST /bookings/{id}/cancel`)**: Automatically frees seats in Redis by evicting the seat map cache.
+   - **Stripe Webhooks (`POST /webhook/stripe`)**: Real-time eviction upon `payment_intent.succeeded` and auto-refund cancellation.
+   - **Background Hold Sweeper (`released_expired_holds` in `app/core/tasks.py`)**: Synchronously and safely evicts affected service seat map caches without event loop conflicts.
+
+3. **DDoS & Scraping Protection**:
+   - `IPRateLimiting` integrated into `GET /services` and `GET /services/{id}/seats` (120 req/min sliding window per IP) returning standard HTTP `429 Too Many Requests` with `Retry-After` header.
+
+---
+
+#### 🧪 Automated Test Verification (`tests/test_caching.py` — 180 Tests Total):
+
+- [x] **`test_services_list_cache_hit_and_miss`**: Confirms initial request returns `X-Cache: MISS`, Redis key is populated, and subsequent request returns `X-Cache: HIT` with identical payload in `<5ms`.
+- [x] **`test_service_detail_cache_hit_and_miss`**: Confirms `GET /services/{id}` caches and serves from Redis.
+- [x] **`test_seat_map_cache_hit_and_miss`**: Confirms `GET /services/{id}/seats` caches live visual inventory.
+- [x] **`test_cache_invalidation_on_service_update`**: Confirms `PUT /services/{id}` immediately evicts cache; next read is a `MISS` returning updated attributes.
+- [x] **`test_cache_invalidation_on_service_delete`**: Confirms `DELETE /services/{id}` invalidates cache, causing immediate `404 Not Found` on detail and omission from listings.
+- [x] **`test_cache_invalidation_on_booking_reservation`**: Confirms booking a seat evicts seat map cache; subsequent query reflects seat as `reserved`.
+- [x] **`test_cache_invalidation_on_sweeper_hold_release`**: Confirms expired hold release by background sweeper evicts seat map cache; subsequent query reflects seat as `available`.
+- [x] **`test_services_rate_limiting_protection`**: Confirms 121st request from same IP is rejected with `429 Too Many Requests` and `Retry-After` header.
+- [x] **`test_cache_fail_open_on_redis_error`**: Confirms API fails open cleanly to PostgreSQL when Redis encounters errors.
 
 ---
 

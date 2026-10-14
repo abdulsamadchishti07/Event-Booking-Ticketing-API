@@ -1,12 +1,15 @@
 from datetime import datetime, timedelta, timezone
 from typing import Annotated, List
 
-from fastapi import APIRouter, Depends, status, HTTPException
+from fastapi import APIRouter, BackgroundTasks, Depends, status, HTTPException
+import redis.asyncio as aioredis
 from sqlalchemy.orm import Session
 from sqlalchemy import func, or_, and_
 
 from app.core import oauth2, redis as redis_client
+from app.core.cache import invalidate_services_cache
 from app.core.config import settings
+from app.core.redis import get_redis
 from app.database import get_db, model, schema
 
 
@@ -40,7 +43,9 @@ MAX_PENDING_HOLDS_PER_USER = 5
 def create_booking(
     booking_in: schema.BookingCreate,
     current_user: Annotated[model.User, Depends(oauth2.get_verified_user)],
-    db: Session = Depends(get_db)
+    background_tasks: BackgroundTasks,
+    db: Session = Depends(get_db),
+    redis: aioredis.Redis = Depends(get_redis)
 ):
     now = datetime.now(timezone.utc)
 
@@ -156,6 +161,7 @@ def create_booking(
         db.commit()
         db.refresh(new_booking)
         
+        background_tasks.add_task(invalidate_services_cache, service_id=service.id, redis=redis)
         return new_booking
 
     # 3. Case B: slot_capacity (General Admission with Atomic Capacity Lock)
@@ -201,6 +207,7 @@ def create_booking(
         db.commit()
         db.refresh(new_booking)
 
+        background_tasks.add_task(invalidate_services_cache, service_id=service.id, redis=redis)
         return new_booking
 
 

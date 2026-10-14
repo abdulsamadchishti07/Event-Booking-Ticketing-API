@@ -12,6 +12,7 @@ from sqlalchemy import func
 
 from app.database import get_db, model, schema
 from app.core import oauth2, redis as redis_client
+from app.core.cache import invalidate_services_cache
 from app.core.config import settings
 from app.services import email
 
@@ -63,17 +64,19 @@ def confirm_booking_and_invoice(
     db.commit()
     db.refresh(payment)
 
-    if background_tasks and booking and booking.user and booking.user.email:
-        background_tasks.add_task(
-            email.send_invoice_email,
-            to_email=booking.user.email,
-            user_name=booking.user.name,
-            invoice_number=invoice_number,
-            event_name=booking.service.service_name if booking.service else "Event Ticket",
-            quantity=booking.quantity,
-            total_amount=str(payment.amount),
-            booking_id=booking.id
-        )
+    if background_tasks and booking:
+        background_tasks.add_task(invalidate_services_cache, service_id=booking.service_id)
+        if booking.user and booking.user.email:
+            background_tasks.add_task(
+                email.send_invoice_email,
+                to_email=booking.user.email,
+                user_name=booking.user.name,
+                invoice_number=invoice_number,
+                event_name=booking.service.service_name if booking.service else "Event Ticket",
+                quantity=booking.quantity,
+                total_amount=str(payment.amount),
+                booking_id=booking.id
+            )
 
     return payment, invoice
 
@@ -430,6 +433,8 @@ async def stripe_webhook(
                     db.add(cancellation)
 
             await run_in_threadpool(db.commit)
+            if booking:
+                background_tasks.add_task(invalidate_services_cache, service_id=booking.service_id)
             return {"status": "auto_refunded_cancelled_booking", "event": event_type}
 
         await run_in_threadpool(confirm_booking_and_invoice, db, booking, payment, background_tasks)
@@ -571,15 +576,17 @@ def cancel_booking_and_refund(
     db.refresh(cancellation)
 
     # Send cancellation email in background
-    if booking and booking.user and booking.user.email:
-        background_tasks.add_task(
-            email.send_cancellation_email,
-            to_email=booking.user.email,
-            user_name=booking.user.name,
-            event_name=booking.service.service_name if booking.service else "Event Ticket",
-            refund_amount=str(refund_amount),
-            reason=reason_text,
-            booking_id=booking.id
-        )
+    if booking:
+        background_tasks.add_task(invalidate_services_cache, service_id=booking.service_id)
+        if booking.user and booking.user.email:
+            background_tasks.add_task(
+                email.send_cancellation_email,
+                to_email=booking.user.email,
+                user_name=booking.user.name,
+                event_name=booking.service.service_name if booking.service else "Event Ticket",
+                refund_amount=str(refund_amount),
+                reason=reason_text,
+                booking_id=booking.id
+            )
 
     return cancellation
