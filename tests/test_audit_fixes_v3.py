@@ -3,6 +3,7 @@ from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from unittest.mock import AsyncMock, MagicMock, patch
 import httpx
+import jwt
 import pytest
 import redis.asyncio as aioredis
 from sqlalchemy.orm import Session
@@ -181,6 +182,61 @@ async def test_logout_session_deletion_failure_failsafe(
         set_cookie = logout_resp.headers.get("set-cookie", "")
         assert "refresh_token=" in set_cookie
         assert "Max-Age=0" in set_cookie
+
+
+async def test_logout_with_already_revoked_token_clears_cookie_and_revokes_session(
+    client: httpx.AsyncClient,
+    test_user: model.User,
+    test_redis: aioredis.Redis
+):
+    """
+    When /logout is called with an already blacklisted access token:
+    1. Returns HTTP 401 Unauthorized ("Token has been revoked").
+    2. Crucially sends Set-Cookie to clear the refresh_token cookie on the client.
+    3. Revokes the active refresh session in Redis so it cannot be used anymore.
+    """
+    # 1. Login to establish session and get tokens
+    login_resp = await client.post(
+        "/login",
+        data={"username": test_user.email, "password": test_user.plain_password}
+    )
+    assert login_resp.status_code == 200
+    access_token = login_resp.json()["access_token"]
+    refresh_token = login_resp.cookies["refresh_token"]
+
+    refresh_payload = jwt.decode(refresh_token, oauth2.SECRET_KEY, algorithms=[oauth2.ALGORITHM])
+    refresh_jti = refresh_payload["jti"]
+
+    # Verify session is active in Redis before logout
+    assert await test_redis.get(f"session:{test_user.id}:{refresh_jti}") == "active"
+
+    # 2. Blacklist the access token beforehand
+    await oauth2.add_blacklist_token(access_token)
+    assert await oauth2.is_token_blacklisted(access_token) is True
+
+    # 3. Present the blacklisted access token AND the refresh cookie to /logout
+    client.cookies.set("refresh_token", refresh_token)
+    logout_resp = await client.post(
+        "/logout",
+        headers={"Authorization": f"Bearer {access_token}"}
+    )
+
+    # 4. Must return 401 "Token has been revoked"
+    assert logout_resp.status_code == 401
+    assert "Token has been revoked" in logout_resp.json()["detail"]
+
+    # 5. Set-Cookie must be present and instruct the browser to delete the cookie
+    set_cookie = logout_resp.headers.get("set-cookie", "")
+    assert "refresh_token=" in set_cookie
+    assert "Max-Age=0" in set_cookie
+
+    # 6. Verify that the refresh session in Redis was revoked!
+    assert await test_redis.get(f"session:{test_user.id}:{refresh_jti}") is None
+
+    # 7. Subsequent /refresh with this refresh token cookie must fail
+    rf_resp = await client.post("/refresh")
+    assert rf_resp.status_code == 401
+
 
 
 # ============================================================================

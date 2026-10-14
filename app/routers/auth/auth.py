@@ -285,12 +285,38 @@ async def logout(
     if settings.is_cookie_secure:
         delete_cookie_header += "; Secure"
 
+    # Helper function to delete refresh token session from Redis
+    async def cleanup_refresh_session():
+        if refresh_token:
+            try:
+                payload = jwt.decode(refresh_token, oauth2.SECRET_KEY, algorithms=[oauth2.ALGORITHM])
+                user_id = payload.get("sub")
+                jti = payload.get("jti")
+                if user_id and jti:
+                    # Instantly delete the session from Redis!
+                    await redis_client.redis_client.delete(f"session:{user_id}:{jti}")
+            except PyJWTError:
+                pass  # If token is already invalid, session is already dead
+            except Exception as e:
+                logger.error("Failed to delete refresh session during logout: %s", e)
+                response.delete_cookie(key="refresh_token")
+                raise HTTPException(
+                    status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                    detail="Token revocation failed. Please retry logout.",
+                    headers={"Set-Cookie": delete_cookie_header}
+                )
+
     if token:
         try:
             if await oauth2.is_token_blacklisted(token):
+                # An already-revoked access token must not prevent the refresh session
+                # and browser cookie from being cleared!
+                await cleanup_refresh_session()
+                response.delete_cookie(key="refresh_token")
                 raise HTTPException(
                     status_code=status.HTTP_401_UNAUTHORIZED,
-                    detail="Token has been revoked"
+                    detail="Token has been revoked",
+                    headers={"Set-Cookie": delete_cookie_header}
                 )
         except HTTPException:
             raise
@@ -314,26 +340,8 @@ async def logout(
                 headers={"Set-Cookie": delete_cookie_header}
             )
 
-    # Read refresh token from cookie
-    refresh_token = request.cookies.get("refresh_token")
-    if refresh_token:
-        try:
-            payload = jwt.decode(refresh_token, oauth2.SECRET_KEY, algorithms=[oauth2.ALGORITHM])
-            user_id = payload.get("sub")
-            jti = payload.get("jti")
-            if user_id and jti:
-                # Instantly delete the session from Redis!
-                await redis_client.redis_client.delete(f"session:{user_id}:{jti}")
-        except PyJWTError:
-            pass  # If token is already invalid, just proceed to delete cookie
-        except Exception as e:
-            logger.error("Failed to delete refresh session during logout: %s", e)
-            response.delete_cookie(key="refresh_token")
-            raise HTTPException(
-                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                detail="Token revocation failed. Please retry logout.",
-                headers={"Set-Cookie": delete_cookie_header}
-            )
+    # Invalidate refresh session in Redis if token was not already blacklisted
+    await cleanup_refresh_session()
 
     # Tell the browser to delete the cookie
     response.delete_cookie(key="refresh_token")
