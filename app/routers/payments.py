@@ -4,6 +4,7 @@ from decimal import Decimal
 from datetime import datetime, timedelta, timezone
 from typing import Annotated
 
+import redis.asyncio as aioredis
 import stripe
 from fastapi import APIRouter, Depends, HTTPException, status, Request, Header, BackgroundTasks
 from starlette.concurrency import run_in_threadpool
@@ -12,6 +13,7 @@ from sqlalchemy import func, or_, and_
 
 from app.database import get_db, model, schema
 from app.core import oauth2, redis as redis_client
+from app.core.redis import get_redis
 from app.core.cache import invalidate_services_cache
 from app.core.config import settings
 from app.services import email
@@ -32,7 +34,8 @@ def confirm_booking_and_invoice(
     db: Session,
     booking: model.Booking | None,
     payment: model.Payment,
-    background_tasks: BackgroundTasks | None = None
+    background_tasks: BackgroundTasks | None = None,
+    redis: aioredis.Redis | None = None
 ) -> tuple[model.Payment, model.Invoice]:
     """
     Atomic transition of payment to SUCCEEDED and booking to CONFIRMED.
@@ -65,7 +68,7 @@ def confirm_booking_and_invoice(
     db.refresh(payment)
 
     if background_tasks and booking:
-        background_tasks.add_task(invalidate_services_cache, service_id=booking.service_id)
+        background_tasks.add_task(invalidate_services_cache, service_id=booking.service_id, redis=redis)
         if booking.user and booking.user.email:
             background_tasks.add_task(
                 email.send_invoice_email,
@@ -99,7 +102,8 @@ def create_payment_intent_for_booking(
     booking_id: int,
     background_tasks: BackgroundTasks,
     current_user: Annotated[model.User, Depends(oauth2.get_verified_user)],
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    redis: aioredis.Redis = Depends(get_redis)
 ):
     """
     Initiates payment for an active reservation hold:
@@ -169,7 +173,7 @@ def create_payment_intent_for_booking(
                     intent = stripe.PaymentIntent.retrieve(existing_payment.stripe_payment_intent_id)
                     if intent.status == "succeeded":
                         # Payment already completed on Stripe! Reconcile immediately with invoice & email
-                        confirm_booking_and_invoice(db, booking, existing_payment, background_tasks)
+                        confirm_booking_and_invoice(db, booking, existing_payment, background_tasks, redis=redis)
                         return existing_payment
                     elif intent.status in ["requires_payment_method", "requires_confirmation", "requires_action", "processing"]:
                         return existing_payment
@@ -187,7 +191,7 @@ def create_payment_intent_for_booking(
             try:
                 intent = stripe.PaymentIntent.retrieve(existing_payment.stripe_payment_intent_id)
                 if intent.status == "succeeded":
-                    confirm_booking_and_invoice(db, booking, existing_payment, background_tasks)
+                    confirm_booking_and_invoice(db, booking, existing_payment, background_tasks, redis=redis)
                     return existing_payment
                 # If still open on Stripe, reactivate and return client_secret
                 elif intent.status in ["requires_payment_method", "requires_confirmation", "requires_action"]:
@@ -241,7 +245,7 @@ def create_payment_intent_for_booking(
             db.add(payment)
             db.flush()
 
-        confirm_booking_and_invoice(db, booking, payment, background_tasks)
+        confirm_booking_and_invoice(db, booking, payment, background_tasks, redis=redis)
         return payment
 
     # Convert to integer cents for Stripe (e.g. 20.00 -> 2000)
@@ -301,7 +305,8 @@ async def stripe_webhook(
     request: Request,
     background_tasks: BackgroundTasks,
     stripe_signature: Annotated[str | None, Header(alias="stripe-signature")] = None,
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    redis: aioredis.Redis = Depends(get_redis)
 ):
     """
     Listens for asynchronous webhook events from Stripe:
@@ -465,10 +470,10 @@ async def stripe_webhook(
 
             await run_in_threadpool(db.commit)
             if booking:
-                background_tasks.add_task(invalidate_services_cache, service_id=booking.service_id)
+                background_tasks.add_task(invalidate_services_cache, service_id=booking.service_id, redis=redis)
             return {"status": "auto_refunded_cancelled_booking", "event": event_type}
 
-        await run_in_threadpool(confirm_booking_and_invoice, db, booking, payment, background_tasks)
+        await run_in_threadpool(confirm_booking_and_invoice, db, booking, payment, background_tasks, redis)
         return {"status": "success", "event": event_type}
 
     # 4. Handle payment_intent.payment_failed
@@ -500,7 +505,8 @@ def cancel_booking_and_refund(
     background_tasks: BackgroundTasks,
     current_user: Annotated[model.User, Depends(oauth2.get_verified_user)],
     cancellation_in: schema.CancellationBase = None,
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    redis: aioredis.Redis = Depends(get_redis)
 ):
     """
     Cancels a booking and reverses financial settlement:
@@ -615,7 +621,7 @@ def cancel_booking_and_refund(
 
     # Send cancellation email in background
     if booking:
-        background_tasks.add_task(invalidate_services_cache, service_id=booking.service_id)
+        background_tasks.add_task(invalidate_services_cache, service_id=booking.service_id, redis=redis)
         if booking.user and booking.user.email:
             background_tasks.add_task(
                 email.send_cancellation_email,

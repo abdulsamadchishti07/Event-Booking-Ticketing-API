@@ -2,10 +2,11 @@ import secrets
 from datetime import datetime, timedelta, timezone
 from typing import Annotated
 
+import redis.asyncio as aioredis
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, status, Response
 from sqlalchemy import func
 from sqlalchemy.exc import IntegrityError
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, joinedload
 from starlette.concurrency import run_in_threadpool
 
 from app.core import oauth2, redis as redis_client
@@ -399,18 +400,23 @@ async def update_user(
     status_code=status.HTTP_204_NO_CONTENT,
     summary="Delete user profile"
 )
-def delete_user(
+async def delete_user(
     id: int,
     current_user: Annotated[model.User, Depends(oauth2.get_verified_user)],
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    redis: aioredis.Redis = Depends(redis_client.get_redis)
 ):
     """
     Deletes an account:
     - Verifies user exists
     - Ensures user is deleting their own account
     - Validates no existing bookings block deletion (as customer or seller)
+    - Revokes all active sessions & user token validity in Redis
+    - Invalidates services cache if user had a seller profile
     """
-    user = db.query(model.User).filter(model.User.id == id).first()
+    user = await run_in_threadpool(
+        lambda: db.query(model.User).options(joinedload(model.User.seller_profile)).filter(model.User.id == id).first()
+    )
     if not user:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -425,7 +431,9 @@ def delete_user(
         )
 
     # Check for existing bookings as customer
-    has_bookings = db.query(model.Booking).filter(model.Booking.user_id == user.id).first()
+    has_bookings = await run_in_threadpool(
+        lambda: db.query(model.Booking).filter(model.Booking.user_id == user.id).first()
+    )
     if has_bookings:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -433,18 +441,33 @@ def delete_user(
         )
 
     # Check for existing bookings on seller's events
-    if user.seller_profile:
-        seller_event_booking = db.query(model.Booking).join(model.Services).filter(
-            model.Services.seller_id == user.seller_profile.id
-        ).first()
+    had_seller_profile = user.seller_profile is not None
+    if had_seller_profile:
+        seller_event_booking = await run_in_threadpool(
+            lambda: db.query(model.Booking).join(model.Services).filter(
+                model.Services.seller_id == user.seller_profile.id
+            ).first()
+        )
         if seller_event_booking:
             raise HTTPException(
                 status_code=status.HTTP_409_CONFLICT,
                 detail="Cannot delete account: you have active events with associated bookings."
             )
 
-    db.delete(user)
-    db.commit()
+    await run_in_threadpool(db.delete, user)
+    await run_in_threadpool(db.commit)
+
+    await redis_client.revoke_all_user_sessions(id, redis=redis)
+    now_ts = datetime.now(timezone.utc).timestamp()
+    await redis.set(
+        f"user_revoked_at:{id}",
+        now_ts,
+        ex=settings.access_token_expire_minutes * 60
+    )
+    if had_seller_profile:
+        from app.core.cache import invalidate_services_cache
+        await invalidate_services_cache(redis=redis)
+
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 

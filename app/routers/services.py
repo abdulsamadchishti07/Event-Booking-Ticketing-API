@@ -137,12 +137,13 @@ def create_service_tier(
     db: Session = Depends(get_db),
     redis: aioredis.Redis = Depends(get_redis)
 ):
-    # Verifyied Seller
-    if not current_user.seller_profile:
+    if current_user.role != model.UserRole.ADMIN and not current_user.seller_profile:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="User does not have an active seller profile"
         )
+
+    seller_id = current_user.seller_profile.id if current_user.seller_profile else None
     
     # Check if service exits or not
     serivice = db.query(model.Services).filter(model.Services.id == service_id).first()
@@ -152,8 +153,8 @@ def create_service_tier(
             detail=f"Service with id {service_id} not found"
             )
     
-    # ownership check only owner can make the ticket
-    if serivice.seller_id != current_user.seller_profile.id:
+    # ownership check: owners and admins can modify
+    if current_user.role != model.UserRole.ADMIN and serivice.seller_id != seller_id:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Not authorized to modify this service"
@@ -206,13 +207,13 @@ def bulk_create_inventory(
     db: Session = Depends(get_db),
     redis: aioredis.Redis = Depends(get_redis)
 ):
-
-    # 1
-    if not current_user.seller_profile:
+    if current_user.role != model.UserRole.ADMIN and not current_user.seller_profile:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="User does not have an active seller profile"
         )
+
+    seller_id = current_user.seller_profile.id if current_user.seller_profile else None
 
     # 2
     service = db.query(model.Services).filter(model.Services.id == service_id).first()
@@ -223,8 +224,8 @@ def bulk_create_inventory(
         )
     
     # 3
-    # ownership check only owner can make the ticket
-    if service.seller_id != current_user.seller_profile.id:
+    # ownership check: owners and admins can modify
+    if current_user.role != model.UserRole.ADMIN and service.seller_id != seller_id:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Not authorized to modify this service"
@@ -334,6 +335,19 @@ async def search_services(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="min_price cannot be greater than max_price"
             )
+
+    if date_from is not None:
+        date_from = (
+            date_from.replace(tzinfo=timezone.utc)
+            if date_from.tzinfo is None
+            else date_from.astimezone(timezone.utc)
+        )
+    if date_to is not None:
+        date_to = (
+            date_to.replace(tzinfo=timezone.utc)
+            if date_to.tzinfo is None
+            else date_to.astimezone(timezone.utc)
+        )
 
     if date_from is not None and date_to is not None:
         if date_from > date_to:

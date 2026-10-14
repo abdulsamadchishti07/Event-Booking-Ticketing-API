@@ -114,11 +114,13 @@ def update_location(
     db: Session = Depends(get_db),
     redis: aioredis.Redis = Depends(get_redis)
 ):
-    if not current_user.seller_profile:
+    if current_user.role != model.UserRole.ADMIN and not current_user.seller_profile:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="User does not have seller profile"
         )
+
+    seller_id = current_user.seller_profile.id if current_user.seller_profile else None
 
     location = db.query(model.Location).filter(model.Location.id == id).first()
     if not location:
@@ -127,8 +129,8 @@ def update_location(
             detail=f"Location with id {id} not found"
         )
 
-    # Ownership check
-    if location.seller_id != current_user.seller_profile.id:
+    # Ownership check: owners and admins can update
+    if current_user.role != model.UserRole.ADMIN and location.seller_id != seller_id:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Not authorized to update this location"
@@ -162,11 +164,13 @@ def delete_location(
     current_user: Annotated[model.User, Depends(oauth2.require_seller)],
     db: Session = Depends(get_db)
 ):
-    if not current_user.seller_profile:
+    if current_user.role != model.UserRole.ADMIN and not current_user.seller_profile:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="User does not have seller profile"
         )
+
+    seller_id = current_user.seller_profile.id if current_user.seller_profile else None
 
     location = db.query(model.Location).filter(model.Location.id == id).first()  
     if not location:
@@ -176,7 +180,7 @@ def delete_location(
         )
     
     # 1. Ownership check MUST run before business rule check (fail closed, prevent info leak)
-    if location.seller_id != current_user.seller_profile.id:
+    if current_user.role != model.UserRole.ADMIN and location.seller_id != seller_id:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Not authorized to delete this location"

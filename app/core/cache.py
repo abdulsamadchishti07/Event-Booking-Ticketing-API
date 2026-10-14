@@ -2,7 +2,7 @@ import asyncio
 import hashlib
 import json
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional
 
 import redis.asyncio as aioredis
@@ -42,14 +42,23 @@ def make_services_list_cache_key(
         booking_mode.value if hasattr(booking_mode, "value") else str(booking_mode)
     ) if booking_mode else None
 
+    def _norm_dt_str(dt: Optional[datetime]) -> Optional[str]:
+        if dt is None:
+            return None
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        else:
+            dt = dt.astimezone(timezone.utc)
+        return dt.isoformat()
+
     params = {
         "city": city.strip().lower() if city else None,
         "country": country.strip().lower() if country else None,
         "booking_mode": bm_str,
         "min_price": round(float(min_price), 2) if min_price is not None else None,
         "max_price": round(float(max_price), 2) if max_price is not None else None,
-        "date_from": date_from.isoformat() if date_from is not None else None,
-        "date_to": date_to.isoformat() if date_to is not None else None,
+        "date_from": _norm_dt_str(date_from),
+        "date_to": _norm_dt_str(date_to),
         "include_past": bool(include_past),
         "sort_by": sort_by,
         "limit": limit,
