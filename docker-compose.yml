@@ -1,0 +1,97 @@
+services:
+  # ============================================================================
+  # 1. PostgreSQL 16 Relational Database
+  # ============================================================================
+  postgres:
+    image: postgres:16-alpine
+    container_name: event_booking_postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: event_booking_db
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d event_booking_db"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    networks:
+      - app_network
+
+  # ============================================================================
+  # 2. Redis 7.2 In-Memory Cache & Session Store
+  # ============================================================================
+  redis:
+    image: redis:7.2-alpine
+    container_name: event_booking_redis
+    restart: unless-stopped
+    command: redis-server --save 60 1 --loglevel warning
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    networks:
+      - app_network
+
+  # ============================================================================
+  # 3. FastAPI Web Application (Multi-worker Uvicorn Pool)
+  # ============================================================================
+  web:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: event-booking-api:latest
+    container_name: event_booking_web
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql://postgres:postgres@postgres:5432/event_booking_db
+      REDIS_URL: redis://redis:6379/0
+      SECRET_KEY: ${SECRET_KEY:-e4b85c13e5124b8981e843232bb49f8714db2543e26bc120a16b9b1e95e8712a}
+      ALGORITHM: HS256
+      ACCESS_TOKEN_EXPIRE_MINUTES: 30
+      REFRESH_TOKEN_EXPIRE_DAYS: 7
+      ENVIRONMENT: production
+      TRUSTED_PROXIES: 127.0.0.1,::1,localhost,testclient,172.16.0.0/12,10.0.0.0/8,192.168.0.0/16
+      RUN_MIGRATIONS: "true"
+      STRIPE_SECRET_KEY: ${STRIPE_SECRET_KEY:-sk_test_placeholder_key_here}
+      STRIPE_PUBLISHABLE_KEY: ${STRIPE_PUBLISHABLE_KEY:-pk_test_placeholder_key_here}
+      STRIPE_WEBHOOK_SECRET: ${STRIPE_WEBHOOK_SECRET:-whsec_placeholder_secret_here}
+    expose:
+      - "8000"
+    networks:
+      - app_network
+
+  # ============================================================================
+  # 4. Nginx Reverse Proxy Gateway
+  # ============================================================================
+  nginx:
+    image: nginx:alpine
+    container_name: event_booking_nginx
+    restart: unless-stopped
+    ports:
+      - "80:80"
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/conf.d/default.conf:ro
+    depends_on:
+      web:
+        condition: service_healthy
+    networks:
+      - app_network
+
+volumes:
+  postgres_data:
+  redis_data:
+
+networks:
+  app_network:
+    driver: bridge
