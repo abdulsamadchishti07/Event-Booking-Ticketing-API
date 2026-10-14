@@ -156,15 +156,28 @@ def _get_sync_redis_client(redis_inst: Optional[aioredis.Redis] = None):
     import redis as syncredis
     active = _get_active_redis_client(redis_inst)
     try:
-        kwargs = active.connection_pool.connection_kwargs
+        kwargs = dict(active.connection_pool.connection_kwargs)
+        is_ssl = kwargs.get("ssl", False)
+        connection_class = kwargs.get("connection_class")
+        if connection_class and "ssl" in getattr(connection_class, "__name__", "").lower():
+            is_ssl = True
+
         host = kwargs.get("host", "localhost")
         port = kwargs.get("port", 6379)
         db = kwargs.get("db", 0)
+        username = kwargs.get("username")
         password = kwargs.get("password")
-        if password:
-            url = f"redis://:{password}@{host}:{port}/{db}"
-        else:
-            url = f"redis://{host}:{port}/{db}"
+        scheme = "rediss" if is_ssl else "redis"
+
+        auth = ""
+        if username and password:
+            auth = f"{username}:{password}@"
+        elif password:
+            auth = f":{password}@"
+        elif username:
+            auth = f"{username}@"
+
+        url = f"{scheme}://{auth}{host}:{port}/{db}"
         return syncredis.from_url(url, decode_responses=True)
     except Exception:
         return syncredis.from_url(settings.redis_url, decode_responses=True)

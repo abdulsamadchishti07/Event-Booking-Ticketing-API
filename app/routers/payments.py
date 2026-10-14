@@ -8,7 +8,7 @@ import stripe
 from fastapi import APIRouter, Depends, HTTPException, status, Request, Header, BackgroundTasks
 from starlette.concurrency import run_in_threadpool
 from sqlalchemy.orm import Session
-from sqlalchemy import func
+from sqlalchemy import func, or_, and_
 
 from app.database import get_db, model, schema
 from app.core import oauth2, redis as redis_client
@@ -140,7 +140,10 @@ def create_payment_intent_for_booking(
         )
 
     # 4. Enforce hold TTL
-    hold_expiry = booking.created_at + timedelta(minutes=HOLD_DURATION_MINUTES)
+    booking_created = booking.created_at
+    if booking_created.tzinfo is None:
+        booking_created = booking_created.replace(tzinfo=timezone.utc)
+    hold_expiry = booking_created + timedelta(minutes=HOLD_DURATION_MINUTES)
     if now > hold_expiry:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -398,9 +401,17 @@ async def stripe_webhook(
                         .with_for_update()
                         .first()
                     )
+                    now = datetime.now(timezone.utc)
                     active_booking_count = db.query(func.coalesce(func.sum(model.Booking.quantity), 0)).filter(
                         model.Booking.service_id == booking.service_id,
-                        model.Booking.status.in_([model.BookingStatus.CONFIRMED, model.BookingStatus.PENDING])
+                        or_(
+                            model.Booking.status == model.BookingStatus.CONFIRMED,
+                            model.Booking.id == booking.id,
+                            and_(
+                                model.Booking.status == model.BookingStatus.PENDING,
+                                model.Booking.created_at >= now - timedelta(minutes=HOLD_DURATION_MINUTES)
+                            )
+                        )
                     ).scalar()
                     max_cap = locked_svc.max_capacity if locked_svc and locked_svc.max_capacity is not None else booking.service.max_capacity
                     return active_booking_count <= max_cap
@@ -524,11 +535,15 @@ def cancel_booking_and_refund(
         )
 
     # 4. Check if event has already started
-    if booking.service and now >= booking.service.start_time:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Cannot cancel tickets for an event that has already started"
-        )
+    if booking.service and booking.service.start_time:
+        service_start = booking.service.start_time
+        if service_start.tzinfo is None:
+            service_start = service_start.replace(tzinfo=timezone.utc)
+        if now >= service_start:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Cannot cancel tickets for an event that has already started"
+            )
 
     refund_amount = Decimal("0.00")
 
@@ -570,8 +585,11 @@ def cancel_booking_and_refund(
 
     elif booking.payment and booking.payment.stripe_payment_intent_id:
         is_free_intent = booking.payment.stripe_payment_intent_id.startswith("free_")
-        # Cancel pending Stripe PaymentIntent if booking was not confirmed
-        if booking.payment.status == model.PaymentStatus.REQUIRES_PAYMENT_METHOD and not is_free_intent:
+        # Cancel pending/failed/processing Stripe PaymentIntent if booking was not confirmed
+        if (
+            booking.payment.status not in (model.PaymentStatus.CANCELED, model.PaymentStatus.SUCCEEDED)
+            and not is_free_intent
+        ):
             try:
                 stripe.PaymentIntent.cancel(booking.payment.stripe_payment_intent_id)
                 booking.payment.status = model.PaymentStatus.CANCELED

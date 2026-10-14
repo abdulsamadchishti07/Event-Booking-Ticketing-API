@@ -1,6 +1,4 @@
 from datetime import datetime, timedelta, timezone
-from redis import client
-from fastapi import responses
 import httpx
 import pytest
 from sqlalchemy.orm import Session

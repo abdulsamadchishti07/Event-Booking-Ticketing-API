@@ -57,6 +57,9 @@ def create_booking(
             detail=f"Cannot book more than {MAX_TICKETS_PER_BOOKING} tickets per booking"
         )
 
+    # Lock the user row to serialize concurrent hold creation per user
+    db.query(model.User.id).filter(model.User.id == current_user.id).with_for_update().first()
+
     active_user_holds = db.query(model.Booking.id).filter(
         model.Booking.user_id == current_user.id,
         model.Booking.status == model.BookingStatus.PENDING,

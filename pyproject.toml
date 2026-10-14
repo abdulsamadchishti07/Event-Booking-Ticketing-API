@@ -13,8 +13,6 @@ dependencies = [
     "pydantic-settings==2.14.2",
     "pydantic[email]==2.13.4",
     "pyjwt[crypto]>=2.8.0",
-    "pytest==9.1.1",
-    "pytest-asyncio>=1.4.0",
     "python-dotenv==1.2.2",
     "python-multipart==0.0.32",
     "redis==8.1.0",
@@ -27,3 +25,9 @@ dependencies = [
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
 pythonpath = "."
+
+[dependency-groups]
+dev = [
+    "pytest>=9.1.1",
+    "pytest-asyncio>=1.4.0",
+]

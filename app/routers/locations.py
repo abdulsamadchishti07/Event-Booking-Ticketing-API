@@ -2,12 +2,15 @@ from sqlalchemy import or_
 from typing import Optional
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, status
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
+import redis.asyncio as aioredis
 
 from app.database import get_db, model, schema
 from app.core import oauth2
+from app.core.redis import get_redis
+from app.core.cache import invalidate_services_cache
 
 router = APIRouter(
     prefix="/locations",
@@ -107,7 +110,9 @@ def update_location(
     id: int,
     location_in: schema.LocationUpdate,
     current_user: Annotated[model.User, Depends(oauth2.require_seller)],
-    db: Session = Depends(get_db)
+    background_tasks: BackgroundTasks,
+    db: Session = Depends(get_db),
+    redis: aioredis.Redis = Depends(get_redis)
 ):
     if not current_user.seller_profile:
         raise HTTPException(
@@ -143,6 +148,7 @@ def update_location(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Failed to update location due to database constraint"
         )
+    background_tasks.add_task(invalidate_services_cache, redis=redis)
     return location
 
 

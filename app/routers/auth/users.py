@@ -204,7 +204,7 @@ async def resend_otp(
         window_seconds=120
     )
 
-    user = db.query(model.User).filter(func.lower(model.User.email) == clean_email).first()
+    user = await run_in_threadpool(lambda: db.query(model.User).filter(func.lower(model.User.email) == clean_email).first())
     if not user:
         # Prevent user enumeration: return generic success message
         return {"message": "A new verification code has been sent to your email."}
@@ -217,7 +217,7 @@ async def resend_otp(
     otp = f"{secrets.randbelow(900000) + 100000}"
     user.verification_otp = otp
     user.otp_expires_at = datetime.now(timezone.utc) + timedelta(minutes=OTP_EXPIRY_MINUTES)
-    db.commit()
+    await run_in_threadpool(db.commit)
 
     # Send new OTP in the background
     background_tasks.add_task(email.send_otp_email, user.email, otp)
@@ -369,8 +369,15 @@ async def update_user(
     if update_data:
         for key, value in update_data.items():
             setattr(user, key, value)
-        await run_in_threadpool(db.commit)
-        await run_in_threadpool(db.refresh, user)
+        try:
+            await run_in_threadpool(db.commit)
+            await run_in_threadpool(db.refresh, user)
+        except IntegrityError:
+            await run_in_threadpool(db.rollback)
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="User with this email or phone number already exists."
+            )
 
     if password_changed or email_changed:
         await redis_client.revoke_all_user_sessions(user.id)
@@ -465,7 +472,9 @@ async def forgot_password(
     )
  
     # Check if user exists
-    user = db.query(model.User).filter(func.lower(model.User.email) == clean_email).first()
+    user = await run_in_threadpool(
+        lambda: db.query(model.User).filter(func.lower(model.User.email) == clean_email).first()
+    )
     if not user:
         # Generic response to prevent email enumeration/discovery attacks
         return {"message": "If this email is registered, a password reset code has been sent."}
@@ -516,7 +525,9 @@ async def reset_password(
         )
 
     # 2. Find user in database
-    user = db.query(model.User).filter(model.User.email == clean_email).first()
+    user = await run_in_threadpool(
+        lambda: db.query(model.User).filter(func.lower(model.User.email) == clean_email).first()
+    )
     if not user:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -524,8 +535,8 @@ async def reset_password(
         )
 
     # 3. Hash the new password with Argon2id and save
-    user.password_hash = utils.hash(payload.new_password)
-    db.commit()
+    user.password_hash = await run_in_threadpool(utils.hash, payload.new_password)
+    await run_in_threadpool(db.commit)
 
     # 4. Invalidate all active sessions for this user across all devices and revoke existing access tokens
     await redis_client.revoke_all_user_sessions(user.id)
@@ -536,10 +547,18 @@ async def reset_password(
         ex=settings.access_token_expire_minutes * 60
     )
 
-    # 5. Clean up Redis OTP and unlock account if it was locked out
-    await redis_client.redis_client.delete(f"reset_pwd_otp:{clean_email}")
-    await redis_client.redis_client.delete(f"account_locked:{clean_email}")
-    await redis_client.redis_client.delete(f"failed_logins:{clean_email}")
+    # 5. Clean up Redis OTP and ALL lockout/failure keys (both global and per-IP)
+    keys_to_clear = [
+        f"reset_pwd_otp:{clean_email}",
+        f"account_locked:{clean_email}",
+        f"failed_logins:{clean_email}",
+    ]
+    async for key in redis_client.redis_client.scan_iter(f"account_locked:{clean_email}:*"):
+        keys_to_clear.append(key)
+    async for key in redis_client.redis_client.scan_iter(f"failed_logins:{clean_email}:*"):
+        keys_to_clear.append(key)
+    if keys_to_clear:
+        await redis_client.redis_client.delete(*keys_to_clear)
 
     return {"message": "Password reset successfully. You can now log in with your new password."}
 
@@ -587,7 +606,14 @@ def become_seller(
     if current_user.role != model.UserRole.ADMIN:
         current_user.role = model.UserRole.SELLER
 
-    db.commit()
-    db.refresh(seller_profile)
+    try:
+        db.commit()
+        db.refresh(seller_profile)
+    except IntegrityError:
+        db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Seller profile already exists for this user."
+        )
 
     return seller_profile
