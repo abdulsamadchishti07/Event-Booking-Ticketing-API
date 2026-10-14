@@ -368,24 +368,44 @@ async def stripe_webhook(
             if existing_cancellation and existing_cancellation.refund_amount > Decimal("0.00"):
                 return {"status": "already_refunded"}
 
-        # Check inventory claim validity
+        # Check inventory claim validity under pessimistic locks
         can_confirm = False
         if booking and booking.status == model.BookingStatus.PENDING:
             if booking.service.booking_mode == model.BookingMode.UNIT_ASSIGNED:
-                # If booking is still PENDING and every seat is still RESERVED,
-                # the seats are provably still held for this customer! Confirm regardless of the clock.
-                can_confirm = (
-                    bool(booking.assigned_units) and
-                    all(unit.status == model.ItemStatus.RESERVED for unit in booking.assigned_units)
-                )
+                def check_and_lock_unit_assigned():
+                    if not booking.assigned_units:
+                        return False
+                    unit_ids = sorted([u.id for u in booking.assigned_units])
+                    locked_seats = (
+                        db.query(model.InventoryItems)
+                        .filter(model.InventoryItems.id.in_(unit_ids))
+                        .order_by(model.InventoryItems.id.asc())
+                        .with_for_update()
+                        .all()
+                    )
+                    return len(locked_seats) == len(unit_ids) and all(
+                        unit.status == model.ItemStatus.RESERVED for unit in locked_seats
+                    )
+
+                can_confirm = await run_in_threadpool(check_and_lock_unit_assigned)
+
             elif booking.service.booking_mode == model.BookingMode.SLOT_CAPACITY:
-                active_booking_count = await run_in_threadpool(
-                    lambda: db.query(func.coalesce(func.sum(model.Booking.quantity), 0)).filter(
+                def check_and_lock_slot_capacity():
+                    # Synchronize with create_booking by locking the service row with PostgreSQL pessimistic lock
+                    locked_svc = (
+                        db.query(model.Services)
+                        .filter(model.Services.id == booking.service_id)
+                        .with_for_update()
+                        .first()
+                    )
+                    active_booking_count = db.query(func.coalesce(func.sum(model.Booking.quantity), 0)).filter(
                         model.Booking.service_id == booking.service_id,
                         model.Booking.status.in_([model.BookingStatus.CONFIRMED, model.BookingStatus.PENDING])
                     ).scalar()
-                )
-                can_confirm = active_booking_count <= booking.service.max_capacity
+                    max_cap = locked_svc.max_capacity if locked_svc and locked_svc.max_capacity is not None else booking.service.max_capacity
+                    return active_booking_count <= max_cap
+
+                can_confirm = await run_in_threadpool(check_and_lock_slot_capacity)
 
         # If booking was cancelled, or inventory was released and taken: DO NOT confirm! Initiate auto-refund.
         if not can_confirm:

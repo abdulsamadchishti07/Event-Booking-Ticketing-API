@@ -1,3 +1,4 @@
+import logging
 from typing import Annotated
 import jwt
 from jwt.exceptions import PyJWTError
@@ -12,6 +13,8 @@ from app.core.config import settings
 from app.core import security as utils
 from app.database import get_db, model, schema
 from app.services import email
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(
     tags=["Authentication"]
@@ -278,16 +281,38 @@ async def logout(
             headers={"WWW-Authenticate": "Bearer"}
         )
 
+    delete_cookie_header = "refresh_token=; Max-Age=0; Path=/; SameSite=lax; HttpOnly"
+    if settings.is_cookie_secure:
+        delete_cookie_header += "; Secure"
+
     if token:
-        if await oauth2.is_token_blacklisted(token):
+        try:
+            if await oauth2.is_token_blacklisted(token):
+                raise HTTPException(
+                    status_code=status.HTTP_401_UNAUTHORIZED,
+                    detail="Token has been revoked"
+                )
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.error("Failed to verify token blacklist status during logout: %s", e)
+            response.delete_cookie(key="refresh_token")
             raise HTTPException(
-                status_code=status.HTTP_401_UNAUTHORIZED,
-                detail="Token has been revoked"
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Token revocation check failed. Please retry logout.",
+                headers={"Set-Cookie": delete_cookie_header}
             )
+
         try:
             await oauth2.add_blacklist_token(token)
-        except Exception:
-            pass
+        except Exception as e:
+            logger.error("Failed to blacklist access token during logout: %s", e)
+            response.delete_cookie(key="refresh_token")
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Token revocation failed. Please retry logout.",
+                headers={"Set-Cookie": delete_cookie_header}
+            )
 
     # Read refresh token from cookie
     refresh_token = request.cookies.get("refresh_token")
@@ -301,9 +326,17 @@ async def logout(
                 await redis_client.redis_client.delete(f"session:{user_id}:{jti}")
         except PyJWTError:
             pass  # If token is already invalid, just proceed to delete cookie
-
+        except Exception as e:
+            logger.error("Failed to delete refresh session during logout: %s", e)
+            response.delete_cookie(key="refresh_token")
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Token revocation failed. Please retry logout.",
+                headers={"Set-Cookie": delete_cookie_header}
+            )
 
     # Tell the browser to delete the cookie
     response.delete_cookie(key="refresh_token")
 
     return {"message": "Logged out successfully"}
+

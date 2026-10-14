@@ -1,4 +1,4 @@
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 from decimal import Decimal
 from typing import List, Optional
 
@@ -208,6 +208,13 @@ class ServiceBase(BaseModel):
     start_time: datetime
     end_time: datetime
 
+    @field_validator("start_time", "end_time", mode="after")
+    @classmethod
+    def ensure_timezone_aware(cls, v: datetime) -> datetime:
+        if v.tzinfo is None or v.tzinfo.utcoffset(v) is None:
+            raise ValueError("Datetime must be timezone-aware (e.g. ISO 8601 with timezone offset like '+00:00' or 'Z')")
+        return v.astimezone(timezone.utc)
+
     @model_validator(mode="after")
     def validate_time_range(self) -> "ServiceBase":
         if self.end_time <= self.start_time:
@@ -235,6 +242,15 @@ class ServiceUpdate(BaseModel):
     def reject_nulls(cls, v, info):
         if v is None:
             raise ValueError(f"{info.field_name} cannot be null")
+        return v
+
+    @field_validator("start_time", "end_time", mode="after")
+    @classmethod
+    def ensure_timezone_aware(cls, v: Optional[datetime]) -> Optional[datetime]:
+        if v is not None:
+            if v.tzinfo is None or v.tzinfo.utcoffset(v) is None:
+                raise ValueError("Datetime must be timezone-aware (e.g. ISO 8601 with timezone offset like '+00:00' or 'Z')")
+            return v.astimezone(timezone.utc)
         return v
 
     @model_validator(mode="after")

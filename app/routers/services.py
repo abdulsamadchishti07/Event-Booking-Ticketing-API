@@ -53,11 +53,10 @@ def create_services(
             detail="User does not have a active profile"
         )
 
-    # Validate event start time is in the future
+    # Validate event start time is in the future (normalize to UTC)
     now = datetime.now(timezone.utc)
-    start_time = services_in.start_time
-    if start_time.tzinfo is None:
-        start_time = start_time.replace(tzinfo=timezone.utc)
+    start_time = services_in.start_time.astimezone(timezone.utc)
+    end_time = services_in.end_time.astimezone(timezone.utc)
     if start_time < now:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -93,7 +92,7 @@ def create_services(
             detail="max_capacity cannot be set for unit_assigned booking mode"
         )
 
-    # Create the service linked to current seller
+    # Create the service linked to current seller with normalized UTC datetimes
     new_services = model.Services(
         seller_id=current_user.seller_profile.id,
         location_id=services_in.location_id,
@@ -102,8 +101,8 @@ def create_services(
         booking_mode=services_in.booking_mode,
         max_capacity=services_in.max_capacity,
         base_price=services_in.base_price,
-        start_time=services_in.start_time,
-        end_time=services_in.end_time,
+        start_time=start_time,
+        end_time=end_time,
     )
 
     try:
