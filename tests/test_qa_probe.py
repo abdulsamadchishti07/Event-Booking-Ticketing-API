@@ -100,13 +100,14 @@ async def test_password_reset_revokes_existing_access_token(client, test_user, u
 async def test_stale_refresh_token_must_not_wipe_other_sessions(client, test_user, test_redis):
     a = await client.post("/login", data={"username": test_user.email, "password": test_user.plain_password})
     old_cookie = a.cookies.get("refresh_token")
-    await client.post("/logout", headers={"Authorization": f"Bearer {a.json()['access_token']}"},
-                      cookies={"refresh_token": old_cookie})
+    client.cookies.set("refresh_token", old_cookie)
+    await client.post("/logout", headers={"Authorization": f"Bearer {a.json()['access_token']}"})
     client.cookies.clear()
     await client.post("/login", data={"username": test_user.email, "password": test_user.plain_password})
     live_before = [k async for k in test_redis.scan_iter(f"session:{test_user.id}:*")]
     client.cookies.clear()
-    await client.post("/refresh", cookies={"refresh_token": old_cookie})   # stale token from logged-out session
+    client.cookies.set("refresh_token", old_cookie)
+    await client.post("/refresh")   # stale token from logged-out session
     live_after = [k async for k in test_redis.scan_iter(f"session:{test_user.id}:*")]
     assert len(live_before) == 1 and len(live_after) == 1, "BUG: stale token wiped a live session"
 

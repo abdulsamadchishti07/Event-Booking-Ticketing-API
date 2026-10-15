@@ -407,10 +407,8 @@ async def test_cookie_only_logout_succeeds(
     assert refresh_cookie is not None
 
     # 2. Call /logout with ONLY the cookie (no Authorization header!)
-    logout_res = await client.post(
-        "/logout",
-        cookies={"refresh_token": refresh_cookie}
-    )
+    client.cookies.set("refresh_token", refresh_cookie)
+    logout_res = await client.post("/logout")
     assert logout_res.status_code == 200
     assert logout_res.json()["message"] == "Logged out successfully"
 
@@ -434,12 +432,14 @@ async def test_refresh_token_concurrent_tab_grace_window(
     refresh_cookie = login_res.cookies.get("refresh_token")
 
     # Tab 1 refreshes
-    tab1_res = await client.post("/refresh", cookies={"refresh_token": refresh_cookie})
+    client.cookies.set("refresh_token", refresh_cookie)
+    tab1_res = await client.post("/refresh")
     assert tab1_res.status_code == 200
     assert "access_token" in tab1_res.json()
 
     # Tab 2 refreshes immediately with the same original cookie within grace window
-    tab2_res = await client.post("/refresh", cookies={"refresh_token": refresh_cookie})
+    client.cookies.set("refresh_token", refresh_cookie)
+    tab2_res = await client.post("/refresh")
     assert tab2_res.status_code == 401
     assert "set-cookie" in tab2_res.headers
 
