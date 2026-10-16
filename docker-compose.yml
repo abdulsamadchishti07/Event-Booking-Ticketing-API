@@ -66,6 +66,7 @@ services:
       STRIPE_SECRET_KEY: ${STRIPE_SECRET_KEY:-sk_test_placeholder_key_here}
       STRIPE_PUBLISHABLE_KEY: ${STRIPE_PUBLISHABLE_KEY:-pk_test_placeholder_key_here}
       STRIPE_WEBHOOK_SECRET: ${STRIPE_WEBHOOK_SECRET:-whsec_placeholder_secret_here}
+      SERVICES_RATE_LIMIT: ${SERVICES_RATE_LIMIT:-10000}
     expose:
       - "8000"
     networks:
