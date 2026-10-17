@@ -1,3 +1,9 @@
+import asyncio
+from contextlib import asynccontextmanager
+import ipaddress
+import logging
+import uuid
+
 from fastapi import Depends, HTTPException, Request, status
 import redis.asyncio as aioredis
 
@@ -120,7 +126,8 @@ class IPRateLimiting:
         redis: aioredis.Redis = Depends(get_redis)
     ):
         ip = get_client_ip(request)
-        end_point = request.url.path
+        route = request.scope.get("route")
+        end_point = route.path if route else request.url.path
 
         # construct key containing ratelimit
         redis_key = f"Rate_Limit:{ip}:{end_point}"
@@ -192,3 +199,44 @@ async def revoke_all_user_sessions(
     if session_keys:
         await redis.delete(*session_keys)
     return len(session_keys)
+
+
+@asynccontextmanager
+async def distributed_lock(
+    redis: aioredis.Redis,
+    lock_key: str,
+    expire_seconds: int = 30,
+    acquire_timeout: float = 5.0
+):
+    """
+    Asynchronous distributed lock using Redis with atomic token release (Lua script).
+    Guarantees only one worker executes the critical section across distributed nodes.
+    """
+    token = str(uuid.uuid4())
+    end_time = asyncio.get_event_loop().time() + acquire_timeout
+    acquired = False
+
+    while asyncio.get_event_loop().time() < end_time:
+        if await redis.set(f"lock:{lock_key}", token, nx=True, ex=expire_seconds):
+            acquired = True
+            break
+        await asyncio.sleep(0.05)
+
+    if not acquired:
+        raise TimeoutError(f"Could not acquire distributed lock for key: {lock_key}")
+
+    try:
+        yield token
+    finally:
+        # Atomic release using Lua script to prevent releasing someone else's lock if expired
+        lua_release = """
+        if redis.call("get", KEYS[1]) == ARGV[1] then
+            return redis.call("del", KEYS[1])
+        else
+            return 0
+        end
+        """
+        try:
+            await redis.eval(lua_release, 1, f"lock:{lock_key}", token)
+        except Exception:
+            pass

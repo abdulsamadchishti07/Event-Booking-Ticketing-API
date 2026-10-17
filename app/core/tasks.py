@@ -116,12 +116,28 @@ def released_expired_holds(db: Session = None):
 async def run_hold_sweeper_loop():
     """
     Infinite background loop running every 60 seconds.
+    Coordinates across multiple Uvicorn workers using a Redis distributed lock.
     Catches all exceptions so sweeper never dies on transient errors.
     """
+    import redis.asyncio as aioredis
+    import uuid
+
+    worker_id = str(uuid.uuid4())
+    lock_key = "lock:hold_sweeper_leader"
+
     while True:
         try:
             await asyncio.sleep(60)
-            await asyncio.to_thread(released_expired_holds)
+            redis = aioredis.from_url(settings.redis_url, decode_responses=True)
+            try:
+                # Attempt to acquire leader lock for 50s so only 1 worker sweeps per interval
+                acquired = await redis.set(lock_key, worker_id, nx=True, ex=50)
+                if acquired:
+                    await asyncio.to_thread(released_expired_holds)
+                else:
+                    logger.debug("Hold sweeper: Another worker holds the leader lock. Skipping cycle.")
+            finally:
+                await redis.aclose()
         except asyncio.CancelledError:
             logger.info("Hold sweeper loop cancelled")
             break

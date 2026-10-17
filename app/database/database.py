@@ -7,8 +7,8 @@ from app.core.config import settings
 # Construct the SQLAlchemy database engine with high-concurrency connection pool
 engine = create_engine(
     settings.database_url,
-    pool_size=25,
-    max_overflow=25,
+    pool_size=10,
+    max_overflow=5,
     pool_timeout=30,
     pool_pre_ping=True
 )
