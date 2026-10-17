@@ -15,3 +15,6 @@ postman
 
 #enviorment
 .env
+
+# Testing cache
+.pytest_cache/
