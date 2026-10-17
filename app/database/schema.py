@@ -68,6 +68,21 @@ class UserBase(BaseModel):
     dob: date
     phone_no: Optional[str] = Field(None, max_length=20)
 
+    @field_validator("phone_no", mode="before")
+    @classmethod
+    def normalize_phone_no(cls, v):
+        if v is None:
+            return None
+        if isinstance(v, str):
+            v_clean = v.strip()
+            if not v_clean:
+                return None
+            import re
+            if not re.match(r"^\+?[0-9\s\-()]{7,20}$", v_clean):
+                raise ValueError("Invalid phone number format. Must contain 7 to 20 digits.")
+            return v_clean
+        return v
+
 
 class UserCreate(UserBase):
     password: str = Field(..., min_length=8, max_length=100)
@@ -80,6 +95,21 @@ class UserUpdate(BaseModel):
     phone_no: Optional[str] = Field(None, max_length=20)
     password: Optional[str] = Field(None, min_length=8, max_length=100)
     current_password: Optional[str] = Field(None, min_length=1, max_length=100)
+
+    @field_validator("phone_no", mode="before")
+    @classmethod
+    def normalize_phone_no(cls, v):
+        if v is None:
+            return None
+        if isinstance(v, str):
+            v_clean = v.strip()
+            if not v_clean:
+                return None
+            import re
+            if not re.match(r"^\+?[0-9\s\-()]{7,20}$", v_clean):
+                raise ValueError("Invalid phone number format. Must contain 7 to 20 digits.")
+            return v_clean
+        return v
 
     @field_validator("name", "email", "dob", mode="before")
     @classmethod
@@ -170,7 +200,7 @@ class LocationOut(LocationBase):
 # ==========================================================
 class ServiceTierBase(BaseModel):
     name: str = Field(..., min_length=1, max_length=50)
-    price: Decimal = Field(..., ge=0, decimal_places=2)
+    price: Decimal = Field(..., ge=0, le=Decimal("99999999.99"), max_digits=10, decimal_places=2)
 
 
 class ServiceTierCreate(ServiceTierBase):
@@ -179,7 +209,7 @@ class ServiceTierCreate(ServiceTierBase):
 
 class ServiceTierUpdate(BaseModel):
     name: Optional[str] = Field(None, min_length=1, max_length=50)
-    price: Optional[Decimal] = Field(None, ge=0, decimal_places=2)
+    price: Optional[Decimal] = Field(None, ge=0, le=Decimal("99999999.99"), max_digits=10, decimal_places=2)
 
     @field_validator("name", "price", mode="before")
     @classmethod
@@ -204,7 +234,7 @@ class ServiceBase(BaseModel):
     service_desc: Optional[str] = Field(None, max_length=255)
     booking_mode: BookingMode = BookingMode.SLOT_CAPACITY
     max_capacity: Optional[int] = Field(None, ge=1)
-    base_price: Decimal = Field(..., ge=0, decimal_places=2)
+    base_price: Decimal = Field(..., ge=0, le=Decimal("99999999.99"), max_digits=10, decimal_places=2)
     start_time: datetime
     end_time: datetime
 
@@ -233,7 +263,7 @@ class ServiceUpdate(BaseModel):
     service_desc: Optional[str] = Field(None, max_length=255)
     booking_mode: Optional[BookingMode] = None
     max_capacity: Optional[int] = Field(None, ge=1)
-    base_price: Optional[Decimal] = Field(None, ge=0, decimal_places=2)
+    base_price: Optional[Decimal] = Field(None, ge=0, le=Decimal("99999999.99"), max_digits=10, decimal_places=2)
     start_time: Optional[datetime] = None
     end_time: Optional[datetime] = None
 
@@ -340,6 +370,8 @@ class BookingStatusUpdate(BaseModel):
 class BookingOut(BookingBase):
     id: int
     user_id: int
+    unit_price: Optional[Decimal] = None
+    total_amount: Optional[Decimal] = None
     start_time: datetime
     end_time: datetime
     status: BookingStatus
@@ -353,7 +385,7 @@ class BookingOut(BookingBase):
 # 8. Payment Schemas
 # ==========================================================
 class PaymentBase(BaseModel):
-    amount: Decimal = Field(..., ge=0, decimal_places=2)
+    amount: Decimal = Field(..., ge=0, le=Decimal("99999999.99"), max_digits=10, decimal_places=2)
     currency: str = Field(default="usd", min_length=3, max_length=3)
 
 
@@ -403,7 +435,9 @@ class CancellationBase(BaseModel):
 
 class CancellationCreate(CancellationBase):
     booking_id: int
-    refund_amount: Optional[Decimal] = Field(default=Decimal("0.00"), ge=0, decimal_places=2)
+    refund_amount: Optional[Decimal] = Field(
+        default=Decimal("0.00"), ge=0, le=Decimal("99999999.99"), max_digits=10, decimal_places=2
+    )
 
 
 class CancellationOut(CancellationBase):

@@ -722,15 +722,33 @@ def delete_service(
             detail="Not authorized to delete this service"
         )
 
-    # Prevent deleting an event that has any existing bookings (pending or confirmed)
-    has_bookings = db.query(model.Booking).filter(
-        model.Booking.service_id == service_id
+    # Prevent deleting an event that has active bookings (pending or confirmed)
+    active_booking = db.query(model.Booking).filter(
+        model.Booking.service_id == service_id,
+        model.Booking.status.in_([model.BookingStatus.PENDING, model.BookingStatus.CONFIRMED])
     ).first()
-    if has_bookings:
+    if active_booking:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Cannot delete event with existing {has_bookings.status.value} bookings"
+            detail=f"Cannot delete event with existing {active_booking.status.value} bookings"
         )
+
+    # Clean up any cancelled bookings associated with this service before deleting service
+    cancelled_bookings = db.query(model.Booking).filter(
+        model.Booking.service_id == service_id,
+        model.Booking.status == model.BookingStatus.CANCELLED
+    ).all()
+    for cb in cancelled_bookings:
+        if cb.payment:
+            db.query(model.Invoice).filter(model.Invoice.payment_id == cb.payment.id).delete()
+            db.delete(cb.payment)
+        if cb.cancellation:
+            db.delete(cb.cancellation)
+        if cb.review:
+            db.delete(cb.review)
+        cb.assigned_units.clear()
+        db.delete(cb)
+    db.flush()
 
     db.delete(service)
     db.commit()

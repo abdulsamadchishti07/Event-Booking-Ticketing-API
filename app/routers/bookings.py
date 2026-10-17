@@ -1,4 +1,5 @@
 from datetime import datetime, timedelta, timezone
+from decimal import Decimal
 from typing import Annotated, List
 
 from fastapi import APIRouter, BackgroundTasks, Depends, status, HTTPException
@@ -79,6 +80,13 @@ def create_booking(
             detail=f"Service with id {booking_in.service_id} not found"
         )
 
+    # Prevent sellers from booking tickets for their own events
+    if current_user.seller_profile and service.seller_id == current_user.seller_profile.id:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Sellers cannot book tickets for their own events"
+        )
+
     # Validate event has not already started
     service_start = service.start_time
     if service_start.tzinfo is None:
@@ -90,6 +98,7 @@ def create_booking(
         )
 
     # Validate tier belongs to this service if specified
+    tier = None
     if booking_in.tier_id:
         tier = db.query(model.ServiceTier).filter(
             model.ServiceTier.id == booking_in.tier_id,
@@ -148,12 +157,22 @@ def create_booking(
         for seat in seats:
             seat.status = model.ItemStatus.RESERVED
         
+        # Calculate snapshotted unit price and total amount
+        seat_prices = [
+            Decimal(seat.tier.price) if (seat.tier and seat.tier.price is not None) else Decimal(service.base_price or 0)
+            for seat in seats
+        ]
+        calc_total = sum(seat_prices)
+        calc_unit_price = (calc_total / Decimal(len(seats))) if seats else Decimal(service.base_price or 0)
+
         # Create the booking record
         new_booking = model.Booking(
             user_id=current_user.id,
             service_id=service.id,
             tier_id=booking_in.tier_id,
             quantity=len(seats),
+            unit_price=calc_unit_price,
+            total_amount=calc_total,
             start_time=service.start_time,
             end_time=service.end_time,
             status=model.BookingStatus.PENDING,
@@ -196,11 +215,16 @@ def create_booking(
                 detail=f"Sold out! Only {max(0, (lock_service.max_capacity or 0) - active_booking_count)} tickets remaining"
             )
 
+        unit_price = Decimal(tier.price) if (tier and tier.price is not None) else Decimal(service.base_price or 0)
+        total_amount = unit_price * Decimal(booking_in.quantity)
+
         new_booking = model.Booking(
             user_id=current_user.id,
             service_id=service.id,
             tier_id=booking_in.tier_id,
             quantity=booking_in.quantity,
+            unit_price=unit_price,
+            total_amount=total_amount,
             start_time=service.start_time,
             end_time=service.end_time,
             status=model.BookingStatus.PENDING,

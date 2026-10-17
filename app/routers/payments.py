@@ -8,7 +8,7 @@ import redis.asyncio as aioredis
 import stripe
 from fastapi import APIRouter, Depends, HTTPException, status, Request, Header, BackgroundTasks
 from starlette.concurrency import run_in_threadpool
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, joinedload, selectinload
 from sqlalchemy import func, or_, and_
 
 from app.database import get_db, model, schema
@@ -350,10 +350,15 @@ async def stripe_webhook(
     if not payment:
         return {"status": "untracked_intent", "event": event_type}
 
-    # Lock booking row with PostgreSQL pessimistic lock to coordinate with sweeper
+    # Lock booking row with PostgreSQL pessimistic lock and eagerly load relations to coordinate with sweeper
     booking = await run_in_threadpool(
         lambda: (
             db.query(model.Booking)
+            .options(
+                selectinload(model.Booking.service),
+                selectinload(model.Booking.user),
+                selectinload(model.Booking.assigned_units)
+            )
             .filter(model.Booking.id == payment.booking_id)
             .with_for_update()
             .first()
