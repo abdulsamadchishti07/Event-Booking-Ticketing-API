@@ -221,3 +221,10 @@ uv run locust -f tests/load_testing/locustfile.py --host http://localhost
 ```bash
 uv run pytest
 ```
+
+---
+
+## 6. Next Step: Scaling to 100,000 Concurrent Users
+For the full architectural roadmap, mathematical capacity breakdown, PgBouncer pooling, Nginx microcaching, and distributed testing strategy to scale this backend to **100,000 concurrent users**, see:
+👉 [SCALING_100K.md](file:///home/abdulsamad/Projects/Event%20Booking%20-%20Ticketing%20API/SCALING_100K.md)
+
