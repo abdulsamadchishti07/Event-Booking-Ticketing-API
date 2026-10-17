@@ -7,7 +7,7 @@ from .config import settings
 redis_client = aioredis.from_url(
     settings.redis_url,
     decode_responses=True,
-    max_connections=30
+    max_connections=200
 )
 
 
@@ -107,6 +107,7 @@ class IPRateLimiting:
     1. Increments the counter for this key.
     2. Sets expiration window on the first request.
     3. Raises HTTP 429 if the count exceeds max_requests.
+    Fails open gracefully if Redis connection encounters transient pool saturation.
     """
 
     def __init__(self, max_requests: int, window_seconds: int):
@@ -124,21 +125,27 @@ class IPRateLimiting:
         # construct key containing ratelimit
         redis_key = f"Rate_Limit:{ip}:{end_point}"
 
-        # Atomic Increment & Expire inside Redis via pipeline
-        pipe = redis.pipeline()
-        pipe.incr(redis_key)
-        pipe.expire(redis_key, self.window_seconds, nx=True)
-        res = await pipe.execute()
-        current_hit = res[0]
-        
-        # Block if it hit max hit
-        if current_hit > self.max_requests:
-            ttl = await redis.ttl(redis_key)
-            raise HTTPException(
-                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
-                detail=f"Too many requests from {ip}. Retry after {ttl} seconds.",
-                headers={"Retry-After": str(ttl)}
-            )
+        try:
+            # Atomic Increment & Expire inside Redis via pipeline
+            pipe = redis.pipeline()
+            pipe.incr(redis_key)
+            pipe.expire(redis_key, self.window_seconds, nx=True)
+            res = await pipe.execute()
+            current_hit = res[0]
+            
+            # Block if it hit max hit
+            if current_hit > self.max_requests:
+                ttl = await redis.ttl(redis_key)
+                raise HTTPException(
+                    status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                    detail=f"Too many requests from {ip}. Retry after {ttl} seconds.",
+                    headers={"Retry-After": str(ttl)}
+                )
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.warning(f"IPRateLimiting transient Redis fallback for {ip}: {e}")
+            return
 
 
 async def check_email_and_otp_rate_limiting(
