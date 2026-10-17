@@ -19,6 +19,11 @@ from app.core.config import settings
 
 
 def seed_all():
+    if settings.environment.lower() == "production" or os.getenv("ENVIRONMENT", "").lower() == "production":
+        raise RuntimeError(
+            "CRITICAL SECURITY GUARD: Refusing to run load-test seed script in a PRODUCTION environment! "
+            "This script creates test accounts with known credentials."
+        )
     db = SessionLocal()
     print("🌱 Starting Load Test Data Seeding...")
 

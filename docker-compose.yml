@@ -54,19 +54,19 @@ services:
       redis:
         condition: service_healthy
     environment:
-      DATABASE_URL: postgresql://postgres:postgres@postgres:5432/event_booking_db
+      DATABASE_URL: postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@postgres:5432/${POSTGRES_DB:-event_booking_db}
       REDIS_URL: redis://redis:6379/0
-      SECRET_KEY: ${SECRET_KEY:-e4b85c13e5124b8981e843232bb49f8714db2543e26bc120a16b9b1e95e8712a}
+      SECRET_KEY: ${SECRET_KEY:?SECRET_KEY environment variable is required and must be set in .env}
       ALGORITHM: HS256
-      ACCESS_TOKEN_EXPIRE_MINUTES: 30
+      ACCESS_TOKEN_EXPIRE_MINUTES: ${ACCESS_TOKEN_EXPIRE_MINUTES:-15}
       REFRESH_TOKEN_EXPIRE_DAYS: 7
       ENVIRONMENT: production
       TRUSTED_PROXIES: 127.0.0.1,::1,localhost,testclient,172.16.0.0/12,10.0.0.0/8,192.168.0.0/16
       RUN_MIGRATIONS: "true"
-      STRIPE_SECRET_KEY: ${STRIPE_SECRET_KEY:-sk_test_placeholder_key_here}
-      STRIPE_PUBLISHABLE_KEY: ${STRIPE_PUBLISHABLE_KEY:-pk_test_placeholder_key_here}
-      STRIPE_WEBHOOK_SECRET: ${STRIPE_WEBHOOK_SECRET:-whsec_placeholder_secret_here}
-      SERVICES_RATE_LIMIT: ${SERVICES_RATE_LIMIT:-10000}
+      STRIPE_SECRET_KEY: ${STRIPE_SECRET_KEY:-}
+      STRIPE_PUBLISHABLE_KEY: ${STRIPE_PUBLISHABLE_KEY:-}
+      STRIPE_WEBHOOK_SECRET: ${STRIPE_WEBHOOK_SECRET:-}
+      SERVICES_RATE_LIMIT: ${SERVICES_RATE_LIMIT:-120}
     expose:
       - "8000"
     networks:

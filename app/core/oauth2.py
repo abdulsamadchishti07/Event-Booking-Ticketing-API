@@ -14,7 +14,7 @@ from .config import settings
 
 # JWT settings
 SECRET_KEY = settings.secret_key
-ALGORITHM = settings.algorithm
+ALGORITHM = "HS256"  # Hardcoded standard: prevents algorithm-switching/none attacks
 ACCESS_TOKEN_EXPIRE_MINUTES = settings.access_token_expire_minutes
 REFRESH_TOKEN_EXPIRE_DAYS = settings.refresh_token_expire_days
 

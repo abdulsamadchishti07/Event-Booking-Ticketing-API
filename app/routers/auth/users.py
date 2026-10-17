@@ -1,3 +1,4 @@
+import hmac
 import secrets
 from datetime import datetime, timedelta, timezone
 from typing import Annotated
@@ -144,8 +145,22 @@ async def verify_otp(
     if user.is_verified:
         return {"message": "Account is already verified and active. You can log in."}
 
-    # Verify that the OTP matches
-    if not user.verification_otp or user.verification_otp != payload.otp:
+    # Verify that the OTP matches using constant-time comparison
+    is_match = bool(user.verification_otp and hmac.compare_digest(str(user.verification_otp), str(payload.otp)))
+    if not is_match:
+        failed_key = f"otp_failed_attempts:{clean_email}"
+        failed_count = await redis_client.redis_client.incr(failed_key)
+        if failed_count == 1:
+            await redis_client.redis_client.expire(failed_key, 300)
+        if failed_count >= 5:
+            user.verification_otp = None
+            user.otp_expires_at = None
+            await run_in_threadpool(db.commit)
+            await redis_client.redis_client.delete(failed_key)
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Too many invalid attempts. Verification code has been invalidated. Please request a new one."
+            )
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Invalid verification code."
@@ -169,8 +184,9 @@ async def verify_otp(
     user.otp_expires_at = None
     await run_in_threadpool(db.commit)
     
-    # Once verified successfully, clear the counter:
+    # Once verified successfully, clear counters:
     await redis_client.redis_client.delete(f"Rate_limit_Email:{payload.email.strip().lower()}:verify_otp")
+    await redis_client.redis_client.delete(f"otp_failed_attempts:{clean_email}")
 
     return {"message": "Email verified successfully! Your account is now active. You can log in."}
 
@@ -430,22 +446,26 @@ async def delete_user(
             detail="You are not allowed to perform this action."
         )
 
-    # Check for existing bookings as customer
-    has_bookings = await run_in_threadpool(
-        lambda: db.query(model.Booking).filter(model.Booking.user_id == user.id).first()
+    # Check for existing active bookings as customer
+    has_active_bookings = await run_in_threadpool(
+        lambda: db.query(model.Booking).filter(
+            model.Booking.user_id == user.id,
+            model.Booking.status.in_([model.BookingStatus.PENDING, model.BookingStatus.CONFIRMED])
+        ).first()
     )
-    if has_bookings:
+    if has_active_bookings:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Cannot delete account with associated bookings. Cancel or complete your bookings first."
+            detail="Cannot delete account with active bookings. Cancel or complete your bookings first."
         )
 
-    # Check for existing bookings on seller's events
+    # Check for existing active bookings on seller's events
     had_seller_profile = user.seller_profile is not None
     if had_seller_profile:
         seller_event_booking = await run_in_threadpool(
             lambda: db.query(model.Booking).join(model.Services).filter(
-                model.Services.seller_id == user.seller_profile.id
+                model.Services.seller_id == user.seller_profile.id,
+                model.Booking.status.in_([model.BookingStatus.PENDING, model.BookingStatus.CONFIRMED])
             ).first()
         )
         if seller_event_booking:
@@ -454,8 +474,20 @@ async def delete_user(
                 detail="Cannot delete account: you have active events with associated bookings."
             )
 
-    await run_in_threadpool(db.delete, user)
-    await run_in_threadpool(db.commit)
+    # If user has past (cancelled) bookings, anonymize to preserve historical FK integrity; otherwise hard delete
+    has_any_bookings = await run_in_threadpool(
+        lambda: db.query(model.Booking).filter(model.Booking.user_id == user.id).first()
+    )
+    if has_any_bookings:
+        user.name = "Deleted User"
+        user.email = f"deleted_{user.id}_{int(datetime.now(timezone.utc).timestamp())}@deleted.local"
+        user.phone_no = None
+        user.password = "DELETED_USER_ACCOUNT"
+        user.is_active = False
+        await run_in_threadpool(db.commit)
+    else:
+        await run_in_threadpool(db.delete, user)
+        await run_in_threadpool(db.commit)
 
     await redis_client.revoke_all_user_sessions(id, redis=redis)
     now_ts = datetime.now(timezone.utc).timestamp()
@@ -534,14 +566,25 @@ async def reset_password(
     )
 
 
-    # 1. Verify OTP from Redis
+    # 1. Verify OTP from Redis with constant-time comparison
     stored_otp = await redis_client.redis_client.get(f"reset_pwd_otp:{clean_email}")
     if not stored_otp:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Password reset code has expired or is invalid. Please request a new one."
         )
-    if stored_otp != payload.otp:
+    if not hmac.compare_digest(str(stored_otp), str(payload.otp)):
+        failed_key = f"reset_otp_failed_attempts:{clean_email}"
+        failed_count = await redis_client.redis_client.incr(failed_key)
+        if failed_count == 1:
+            await redis_client.redis_client.expire(failed_key, 300)
+        if failed_count >= 5:
+            await redis_client.redis_client.delete(f"reset_pwd_otp:{clean_email}")
+            await redis_client.redis_client.delete(failed_key)
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Too many invalid attempts. Password reset code has been invalidated. Please request a new one."
+            )
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Invalid verification code."
@@ -573,6 +616,7 @@ async def reset_password(
     # 5. Clean up Redis OTP and ALL lockout/failure keys (both global and per-IP)
     keys_to_clear = [
         f"reset_pwd_otp:{clean_email}",
+        f"reset_otp_failed_attempts:{clean_email}",
         f"account_locked:{clean_email}",
         f"failed_logins:{clean_email}",
     ]
