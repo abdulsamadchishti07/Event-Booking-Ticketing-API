@@ -41,6 +41,7 @@ booking_units = Table(
         "inventory_item_id",
         ForeignKey("inventory_items.id", ondelete="RESTRICT"),
         primary_key=True,
+        index=True,
     ),
 )
 
@@ -69,7 +70,7 @@ class User(Base):
     role: Mapped[UserRole] = mapped_column(
         Enum(UserRole, name="user_role_enum"),
         default=UserRole.CUSTOMER,
-        server_default=UserRole.CUSTOMER.value,
+        server_default=text("'CUSTOMER'"),
         nullable=False,
     )
     phone_no: Mapped[Optional[str]] = mapped_column(String(20), unique=True)
@@ -137,7 +138,7 @@ class Location(Base):
 
     id: Mapped[int] = mapped_column(primary_key=True)
     seller_id: Mapped[int] = mapped_column(
-        ForeignKey("seller_profiles.id", ondelete="CASCADE")
+        ForeignKey("seller_profiles.id", ondelete="CASCADE"), index=True
     )
 
     city: Mapped[str] = mapped_column(String(100))
@@ -164,10 +165,10 @@ class Services(Base):
 
     id: Mapped[int] = mapped_column(primary_key=True)
     seller_id: Mapped[int] = mapped_column(
-        ForeignKey("seller_profiles.id", ondelete="CASCADE")
+        ForeignKey("seller_profiles.id", ondelete="CASCADE"), index=True
     )
     location_id: Mapped[int] = mapped_column(
-        ForeignKey("locations.id", ondelete="RESTRICT")
+        ForeignKey("locations.id", ondelete="RESTRICT"), index=True
     )
 
     service_name: Mapped[str] = mapped_column(String(50))
@@ -284,20 +285,27 @@ class BookingStatus(str, enum.Enum):
 
 class Booking(Base):
     __tablename__ = "bookings"
+    __table_args__ = (
+        Index("ix_bookings_service_status_created", "service_id", "status", "created_at"),
+        Index("ix_bookings_user_status", "user_id", "status"),
+    )
 
     id: Mapped[int] = mapped_column(primary_key=True)
     service_id: Mapped[int] = mapped_column(
-        ForeignKey("services.id", ondelete="RESTRICT")
+        ForeignKey("services.id", ondelete="RESTRICT"), index=True
     )
     user_id: Mapped[int] = mapped_column(
-        ForeignKey("users.id", ondelete="RESTRICT")
+        ForeignKey("users.id", ondelete="RESTRICT"), index=True
     )
     tier_id: Mapped[Optional[int]] = mapped_column(
         ForeignKey("service_tiers.id", ondelete="RESTRICT"),
         nullable=True,
+        index=True,
     )
 
     quantity: Mapped[int] = mapped_column(default=1)
+    unit_price: Mapped[Optional[Decimal]] = mapped_column(Numeric(10, 2), nullable=True)
+    total_amount: Mapped[Optional[Decimal]] = mapped_column(Numeric(10, 2), nullable=True)
 
     start_time: Mapped[datetime] = mapped_column(
         TIMESTAMP(timezone=True), nullable=False
