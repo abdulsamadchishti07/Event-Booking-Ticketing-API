@@ -119,13 +119,13 @@ $$N = \lambda \times W$$
    - At measured peak origin throughput of $\lambda = 1,545\text{ RPS}$ and average human think time of $W = 6.5\text{s}$, a single instance comfortably sustains:
      $$N = 1,545 \times 6.5 \approx \mathbf{10,000 \text{ Concurrent Active Users (CCU)}}$$
 2. **Distributed Production Scaling Roadmap**:
-   - To sustain large distributed drops, public discovery endpoints (`GET /services`, `GET /locations`) are fronted by an Edge CDN (e.g. Cloudflare) absorbing ~90% of traffic. Dynamic booking mutations and authenticated flows hit origin workers horizontally scaled behind a load balancer with PostgreSQL read replicas and connection poolers (detailed in [SCALING_100K.md](SCALING_100K.md)).
+   - To sustain large distributed drops, public discovery endpoints (`GET /services`, `GET /locations`) are fronted by an Edge CDN (e.g. Cloudflare) absorbing ~90% of traffic. Dynamic booking mutations and authenticated flows hit origin workers horizontally scaled behind a load balancer with PostgreSQL read replicas and connection poolers.
 
 ---
 
 ### 📊 Measured Standalone Capacity Matrix
 
-Empirical benchmarks run via `tests/load_testing/k6_per_api_benchmarks.js` and `loadtest.js` to identify subsystem constraints:
+Subsystem capacity constraints based on single-node benchmarking:
 
 | Subsystem & Endpoint | Measured Peak Origin RPS | Median Latency | p95 Latency | Success Rate | Primary Bottleneck / Protection | Scale Architecture |
 | :--- | :---: | :---: | :---: | :---: | :--- | :---: |
@@ -144,8 +144,6 @@ Empirical benchmarks run via `tests/load_testing/k6_per_api_benchmarks.js` and `
 - **Asynchronous Webhook Settlement**: **450 – 600 webhooks / second** processed internally, transitioning booking state from `pending` to `confirmed`.
 - **Zero Double-Billing via Idempotency**: All payment intents and refund calls use deterministic idempotency keys (`booking_{id}_{attempt}`).
 - **Resiliency**: HMAC-SHA256 signature verification (`stripe-signature`). Failed card charges preserve the 10-minute hold window so customers can retry payment without losing their reserved seats.
-
-> 📖 **Full Engineering Analysis & Reproduction Details**: See [BENCHMARK_100K_PROOF.md](BENCHMARK_100K_PROOF.md) and [SCALING_100K.md](SCALING_100K.md).
 
 ---
 

@@ -18,5 +18,3 @@ postman
 
 # Testing cache
 .pytest_cache/
-loadctx.json
-tests/load_testing/loadctx.json
