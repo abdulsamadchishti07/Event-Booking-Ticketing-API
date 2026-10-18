@@ -178,8 +178,8 @@ The payment system integrates **Stripe PaymentIntents**, automated webhooks, cry
 ┌──────────────────────────────────────────────┐ ┌────────────────────────────────────────┐
 │ LAYER 4: REDIS 7.2 IN-MEMORY STORE           │ │ LAYER 5: POSTGRESQL 16 DATABASE        │
 │ - Sub-5ms Read-Through Caching               │ │ - ACID Transaction Isolation           │
-│ - Connection Pool: max_connections = 200     │ │ - Connection Pool (pool_size=25,       │
-│ - Atomic IP Rate Limiter (120 req/min/IP)    │ │   max_overflow=25, pre_ping=True)      │
+│ - Connection Pool: max_connections = 200     │ │ - Connection Pool (pool_size=10,       │
+│ - Atomic IP Rate Limiter (120 req/min/IP)    │ │   max_overflow=5, pre_ping=True)        │
 │ - 10-Minute Seat Reservation Locking         │ │ - Indexed Foreign Keys and B-Trees     │
 └──────────────────────────────────────────────┘ └────────────────────────────────────────┘
 ```
