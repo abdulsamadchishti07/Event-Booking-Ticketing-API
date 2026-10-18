@@ -171,8 +171,8 @@ class Services(Base):
     seller_id: Mapped[int] = mapped_column(
         ForeignKey("seller_profiles.id", ondelete="CASCADE"), index=True
     )
-    location_id: Mapped[int] = mapped_column(
-        ForeignKey("locations.id", ondelete="RESTRICT"), index=True
+    location_id: Mapped[Optional[int]] = mapped_column(
+        ForeignKey("locations.id", ondelete="SET NULL"), index=True, nullable=True
     )
 
     service_name: Mapped[str] = mapped_column(String(50))

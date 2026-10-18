@@ -46,17 +46,21 @@ def create_review(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=f"Only confirmed paid bookings can be reviewed (current status: {booking.status})"
         )
-    # 4. Event completion check (event must have finished)
-    if booking.service:
-        event_end = booking.service.end_time or booking.service.start_time
-        if event_end:
-            if event_end.tzinfo is None:
-                event_end = event_end.replace(tzinfo=timezone.utc)
-            if now < event_end:
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    detail="Cannot review an event before it has taken place"
-                )
+    # 4. Event completion check (event must have finished and must not be archived)
+    if not booking.service or not booking.service.is_active:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Cannot review an archived or deleted event"
+        )
+    event_end = booking.service.end_time or booking.service.start_time
+    if event_end:
+        if event_end.tzinfo is None:
+            event_end = event_end.replace(tzinfo=timezone.utc)
+        if now < event_end:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Cannot review an event before it has taken place"
+            )
     # 5. Check if review already exists for this booking
     existing_review = db.query(model.Review).filter(model.Review.booking_id == booking.id).first()
     if existing_review:
@@ -96,7 +100,7 @@ def get_service_reviews(
     db: Session = Depends(get_db)
 ):
     service = db.query(model.Services).filter(model.Services.id == service_id).first()
-    if not service:
+    if not service or not service.is_active:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Service with id {service_id} not found"

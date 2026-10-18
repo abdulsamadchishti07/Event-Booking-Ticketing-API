@@ -186,12 +186,22 @@ def delete_location(
             detail="Not authorized to delete this location"
         )
 
-    # 2. Business rule check: check if current location has event scheduled
-    if location.services:
+    # 2. Business rule check: check if current location has active event scheduled
+    active_service = db.query(model.Services).filter(
+        model.Services.location_id == id,
+        model.Services.is_active == True
+    ).first()
+    if active_service:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Cannot delete location that has active events/services scheduled"
         )
+
+    # Disassociate archived events from this location so location can be deleted cleanly
+    db.query(model.Services).filter(
+        model.Services.location_id == id,
+        model.Services.is_active == False
+    ).update({model.Services.location_id: None})
 
     try:
         db.delete(location)

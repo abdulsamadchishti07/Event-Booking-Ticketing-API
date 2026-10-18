@@ -294,7 +294,7 @@ class ServiceUpdate(BaseModel):
 class ServiceOut(ServiceBase):
     id: int
     seller_id: int
-    location_id: int
+    location_id: Optional[int] = None
     tiers: List[ServiceTierOut] = []
 
     model_config = ConfigDict(from_attributes=True)

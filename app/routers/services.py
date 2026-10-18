@@ -147,11 +147,11 @@ def create_service_tier(
     
     # Check if service exits or not
     serivice = db.query(model.Services).filter(model.Services.id == service_id).first()
-    if not serivice:
+    if not serivice or not serivice.is_active:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Service with id {service_id} not found"
-            )
+        )
     
     # ownership check: owners and admins can modify
     if current_user.role != model.UserRole.ADMIN and serivice.seller_id != seller_id:
@@ -217,7 +217,7 @@ def bulk_create_inventory(
 
     # 2
     service = db.query(model.Services).filter(model.Services.id == service_id).first()
-    if not service:
+    if not service or not service.is_active:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Service with id {service_id} not found"
@@ -571,7 +571,7 @@ def update_service(
     redis: aioredis.Redis = Depends(get_redis)
 ):
     service = db.query(model.Services).filter(model.Services.id == service_id).first()
-    if not service:
+    if not service or not service.is_active:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Service with id {service_id} not found"
@@ -710,7 +710,7 @@ def delete_service(
     redis: aioredis.Redis = Depends(get_redis)
 ):
     service = db.query(model.Services).filter(model.Services.id == service_id).first()
-    if not service:
+    if not service or not service.is_active:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Service with id {service_id} not found"
