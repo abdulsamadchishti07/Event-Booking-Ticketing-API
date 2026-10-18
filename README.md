@@ -118,23 +118,23 @@ $$N = \lambda \times W$$
 1. **Standalone Single-Node Capacity**:
    - At measured peak origin throughput of $\lambda = 1,545\text{ RPS}$ and average human think time of $W = 6.5\text{s}$, a single instance comfortably sustains:
      $$N = 1,545 \times 6.5 \approx \mathbf{10,000 \text{ Concurrent Active Users (CCU)}}$$
-2. **Distributed Production Scale (100K CCU)**:
-   - To sustain 100,000 CCU, public discovery endpoints (`GET /services`, `GET /locations`) are fronted by an Edge CDN (e.g. Cloudflare) absorbing ~90% of traffic. Dynamic booking mutations and authenticated flows hit origin workers horizontally scaled behind a load balancer with PostgreSQL read replicas (detailed in [SCALING_100K.md](SCALING_100K.md)).
+2. **Distributed Production Scaling Roadmap**:
+   - To sustain large distributed drops, public discovery endpoints (`GET /services`, `GET /locations`) are fronted by an Edge CDN (e.g. Cloudflare) absorbing ~90% of traffic. Dynamic booking mutations and authenticated flows hit origin workers horizontally scaled behind a load balancer with PostgreSQL read replicas and connection poolers (detailed in [SCALING_100K.md](SCALING_100K.md)).
 
 ---
 
-### 📊 Measured Per-API Capacity Matrix
+### 📊 Measured Standalone Capacity Matrix
 
-Empirical benchmarks run via `tests/load_testing/k6_per_api_benchmarks.js` across 74,796 requests to identify subsystem constraints:
+Empirical benchmarks run via `tests/load_testing/k6_per_api_benchmarks.js` and `loadtest.js` to identify subsystem constraints:
 
 | Subsystem & Endpoint | Measured Peak Origin RPS | Median Latency | p95 Latency | Success Rate | Primary Bottleneck / Protection | Scale Architecture |
 | :--- | :---: | :---: | :---: | :---: | :--- | :---: |
-| **1. Health Check**<br>`GET /` | **2,524 RPS** | **6.61 ms** | **33.39 ms** | **100.00%** | **ASGI Loop Overhead**: Pure Uvicorn context switching. | 🟢 Standalone 160K+ CCU |
-| **2. Seat Map Inspection**<br>`GET /services/1/seats` | **1,487 RPS** | **49.66 ms** | **113.06 ms** | **100.00%** | **Serialization**: JSON encoding cached in Redis. | 🟢 Standalone 10K / CDN 100K |
-| **3. Event Discovery**<br>`GET /services?limit=20` | **1,275 RPS** | **179.31 ms** | **271.11 ms** | **100.00%** | **Compression**: Nginx gzip reduces payload to 13 MB/s. | 🟢 Standalone 10K / CDN 100K |
+| **1. Health Check**<br>`GET /` | **2,524 RPS** | **6.61 ms** | **33.39 ms** | **100.00%** | **ASGI Loop Overhead**: Pure Uvicorn context switching. | 🟢 Fast Baseline |
+| **2. Seat Map Inspection**<br>`GET /services/1/seats` | **1,487 RPS** | **49.66 ms** | **113.06 ms** | **100.00%** | **Serialization**: JSON encoding cached in Redis. | 🟢 Redis Read-Through |
+| **3. Event Discovery**<br>`GET /services?limit=20` | **1,275 RPS** | **179.31 ms** | **271.11 ms** | **100.00%** | **Compression**: Nginx gzip reduces payload to 13 MB/s. | 🟢 Gzip + Redis Cache |
 | **4. User Profile Read**<br>`GET /account/me` | **762 RPS** | **108.06 ms** | **307.02 ms** | **93.70%** | **DB Connections**: Saturated at 250 concurrent VUs. | 🟡 Add Redis user profile cache |
-| **5. Seat Reservation Hold**<br>`POST /bookings` | **160 RPS** | **165.76 ms** | **375.88 ms** | **99.90%** | **PostgreSQL Locks**: `SELECT FOR UPDATE` serializes uncommitted seat rows. | 🟡 Add Redis pre-hold queue |
-| **6. Password Hashing**<br>`POST /login` | **25 – 30 RPS** | **1,110 ms** | **1,850 ms** | **100.00%** | **Argon2id Cost**: Intentionally tuned to resist GPU brute-force attacks. | 🟢 Working as designed |
+| **5. Seat Reservation Hold**<br>`POST /bookings` | **62 – 100 RPS** | **165.76 ms** | **2,300 ms** | **99.90%** | **PostgreSQL Locks**: `SELECT FOR UPDATE` serializes uncommitted seat rows on a hot event. | 🟡 Safe ACID Lock (Needs Redis queue for >100 RPS) |
+| **6. Password Hashing**<br>`POST /login` | **4 – 7 RPS** | **1,110 ms** | **1,850 ms** | **100.00%** | **Argon2id Cost**: CPU bound. Capped at 10 concurrent verifications to prevent server starvation. | 🟢 Concurrency Capped (429 Retry-After) |
 
 ---
 

@@ -1,31 +1,25 @@
-# 🚀 Performance Engineering & Concurrency Scaling Analysis
+# 🚀 High-Concurrency Performance & Capacity Benchmark Analysis
 
-This document provides empirical benchmark data, architectural analysis, and theoretical scaling derivations via **Little's Law** to demonstrate how the **Event Booking & Ticketing API** performs on standalone hardware and scales to **100,000 Concurrent Active Users (CCU)** in a distributed production environment.
+This document provides empirical benchmark data, architectural analysis, and theoretical scaling derivations to demonstrate how the **Event Booking & Ticketing API** performs on standalone hardware and outlines the distributed architectural requirements to scale beyond single-node bottlenecks.
 
 ---
 
-## 1. Executive Summary & Capacity Breakdown
+## 1. Empirical Findings & Reality Check
 
-```
-================================================================================
-  STANDALONE MEASURED CAPACITY (1 Node: 2–4 Cores, 4 ASGI Workers, Postgres 16, Redis 7.2):
-  - Cached Reads (Redis hit): ~1,200 – 1,545 Requests / Second (p95: 819ms at 500 CCU, 0 errors)
-  - Cache Misses (Uncached DB Queries): ~250 – 300 Requests / Second
-  - Single Hot Event Booking Holds: ~62 – 100 Requests / Second (p95: 2.3s at 100 CCU; row lock serialized)
-  - Concurrency Safety: 300 users racing for 50 seats = exactly 50 wins, 250 conflicts (409), 0 server errors (500)
-  - Auth Login Throughput (Argon2id CPU bound): ~4 – 7 Logins / Second on 2 cores (capped at 10 concurrent)
-  - Standalone Browsing CCU: 5,000 – 10,000 Concurrent Active Users (browsing only, 6.5s think time)
-  - Standalone Hot-Booking CCU: ~500 – 600 Concurrent Active Buyers racing on a single hot event
-  - Test Concurrency Profile: 85,076 requests tested across synthetic distributed IPs / raised test rate limits
-  - Origin Cache Hit Ratio: 99.998% on discovery and seat map endpoints
-
-  DISTRIBUTED TARGET CAPACITY (Horizontally Scaled + Edge CDN + DB Read Replicas):
-  - Theoretical System Capacity: 15,453 Requests / Second (with 90% CDN edge offload)
-  - Target Concurrency: 100,000+ Concurrent Active Users (CCU) across the distributed cluster
-  - Important: 100K CCU is an ecosystem-level capacity target for distributed deployments,
-    NOT 100K active users on a single 2-core standalone node.
-================================================================================
-```
+> [!IMPORTANT]
+> **Measured Reality vs. Theoretical Targets**:
+> Standalone testing measures what a single containerized node can physically process. Claims of "100K CCU on a single server" are technically unproven and ignore row-level database serialization. On standalone hardware (2–4 CPU cores), empirical measurements show:
+> - **Cached Reads (Redis Hit)**: **~1,200 – 1,500 Requests / Second** (p95 819ms at 500 CCU, 0 errors).
+> - **Uncached Queries (DB Read-through)**: **~250 – 300 Requests / Second**.
+> - **Hot-Event Booking Holds (Pessimistic Row Lock)**: **~62 – 100 Requests / Second** (p95 ~2.3s at 100 CCU; bounded by PostgreSQL row-level `SELECT FOR UPDATE` locks on the same service row).
+> - **Auth Login Throughput**: **~4 – 7 Logins / Second** on 2 cores (Argon2id CPU hashing; capped at 10 concurrent verifications to prevent CPU starvation).
+> - **Data Integrity**: **Zero overselling and zero double-assigned seats**. Under 300 concurrent users racing for 50 seats, the system yielded exactly 50 wins and 250 conflicts (HTTP 409).
+>
+> **What Scaling to 100,000 CCU Actually Requires**:
+> 100K CCU is an ecosystem-level capacity target for distributed deployments, NOT a single-node measurement. Reaching 100K active users requires:
+> 1. Edge CDN (Cloudflare) serving ~90% of read traffic from edge memory (<10ms).
+> 2. Database connection pooling (PgBouncer) sitting in front of PostgreSQL.
+> 3. Decoupled Redis inventory counters or asynchronous booking queues to eliminate single-row lock serialization on the primary database.
 
 ---
 
@@ -197,15 +191,15 @@ Copy and paste these bullet points onto your Software Engineering Resume, Linked
 
 ### Format A (For Senior / Backend Roles):
 > **Backend & Systems Engineer — Event Booking & Ticketing API**
-> - **High-Concurrency Architecture**: Architected and containerized a high-throughput ticketing backend capable of sustaining **100,000 Concurrent Active Users (CCU)** and **15,400+ effective system RPS** using FastAPI, Redis 7.2, PostgreSQL 16, and Nginx.
-> - **Stress Benchmarking with k6**: Validated system limits under **1,000 concurrent virtual users across distinct IP subnets**, recording **85,076 requests in 55 seconds**, **1,545.3 origin RPS**, **14 MB/s throughput**, and **100% request success rate (0 errors)**.
-> - **Read-Through Caching & Edge Offload**: Engineered deterministic SHA-256 query caching and smart cache invalidation on ticket mutations, achieving a **99.998% Redis cache hit ratio** with sub-5ms response times.
+> - **High-Concurrency Architecture**: Architected a production ticketing backend sustaining **1,200–1,500 cached RPS** and **62–100 hot booking holds/sec** using FastAPI, Redis 7.2, PostgreSQL 16, and Nginx.
+> - **Stress Benchmarking with k6**: Validated concurrency limits under high load, recording **14 MB/s throughput**, **sub-5ms Redis cache latencies**, and zero seat double-assignments under flash-sale race conditions.
+> - **Read-Through Caching & Edge Offload**: Engineered deterministic SHA-256 query caching and smart cache invalidation on ticket mutations, achieving a **99.998% Redis cache hit ratio**.
 > - **Zero-Trust Reverse Proxy**: Deployed Nginx reverse proxy with Gzip compression and Cloudflare Tunnel integration, routing public production traffic to `booking.abdulsamadchishti.dev` with end-to-end HTTPS.
 
 ### Format B (Bullet Points for Resume Experience):
-> - Architected a production ticketing platform supporting **100K Concurrent Active Users (CCU)** using FastAPI, Redis 7.2, and PostgreSQL 16.
-> - Benchmarked with Grafana k6 under **1,000 concurrent virtual users**, achieving **1,545.3 peak RPS**, **85,000+ requests**, and **99.99% cache hit rate** with zero errors or dropped packets.
-> - Implemented an atomic Redis sliding-window rate limiter (120 req/min per IP) with trusted proxy CIDR validation.
+> - Architected a production ticketing platform sustaining **1,200–1,500 RPS on cached reads** and **62–100 hot booking RPS** using FastAPI, Redis 7.2, and PostgreSQL 16.
+> - Benchmarked with Grafana k6 under high concurrency, validating zero overselling, zero double-bookings, and clean conflict handling (409) under flash-sale conditions.
+> - Implemented an atomic Redis sliding-window rate limiter with trusted proxy CIDR validation and CPU-starvation safeguards for Argon2id hashing.
 > - Connected global Cloudflare Edge CDN and Cloudflare Tunnel to expose the API under a custom domain (`booking.abdulsamadchishti.dev`) with 100% test coverage across 37 endpoints.
 
 ---
@@ -215,30 +209,27 @@ Copy and paste these bullet points onto your Software Engineering Resume, Linked
 Add this block to your GitHub `README.md` to impress hiring managers:
 
 ```markdown
-## ⚡ High-Concurrency Performance & Benchmarks (100K CCU)
+## ⚡ High-Concurrency Performance & Capacity Benchmarks
 
-The API is architected for extreme high-traffic flash sales (such as stadium concert ticket drops) and was load-tested using **Grafana k6**:
+The API is architected for high-traffic ticket drops and was load-tested using **Grafana k6**:
 
 | Metric | Measured Benchmark Value |
 | :--- | :--- |
-| **Simulated Active Concurrency** | **1,000 Virtual Users (100,000 CCU equivalent via Little's Law)** |
-| **Origin Peak Throughput** | **1,545.3 Requests / Second** |
-| **Total Test Requests** | **85,076 Requests (in 55.1 seconds)** |
-| **Network Throughput** | **14.0 MB / Second (751 MB transferred via Gzip)** |
-| **Cache Hit Ratio** | **99.998% (56,506 hits vs 1 miss)** |
-| **Success Rate** | **100.00% (85,076 out of 85,076 requests succeeded, 0 errors)** |
+| **Origin Peak Cached Throughput** | **1,200 – 1,545 Requests / Second** |
+| **Hot-Event Booking Throughput** | **62 – 100 Holds / Second (Serialized ACID Row Locks)** |
+| **Network Throughput** | **14.0 MB / Second (Gzip Compressed)** |
+| **Cache Hit Ratio** | **99.998% on discovery and seat map endpoints** |
+| **Seat Consistency Under Race Conditions** | **100% Consistent (Zero overselling, zero double-assignments)** |
 | **Min Cache Latency** | **2.09 ms** |
-| **Checks Passed** | **100.00% (85,076 / 85,076 checks passed)** |
 
 ### 🔬 Run the Benchmark Yourself:
 ```bash
-# 1. Start the production stack
-docker compose up -d --build
+# 1. Start the production stack with raised rate limits for testing
+SERVICES_RATE_LIMIT=100000 BOOKINGS_RATE_LIMIT=100000 docker compose up -d --build
 
-# 2. Run the 1,000-VU stress test
-docker run --rm -i --network=host \
-  -v "$PWD/tests/load_testing:/scripts" \
-  grafana/k6 run /scripts/k6_100k_simulation.js
+# 2. Seed data & run the load test
+docker compose exec -T web python seed_loadtest.py
+k6 run loadtest.js
 ```
 ```
 
