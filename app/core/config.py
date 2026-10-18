@@ -48,6 +48,7 @@ class Settings(BaseSettings):
     payments_rate_limit: int = 60  # 60 req/minute per IP for payment endpoints
     auth_rate_limit: int = 100     # 100 req/minute per IP for auth/login endpoints
     max_concurrent_auth_hashes: int = 10  # Max concurrent Argon2 hashes server-wide (CPU starvation guard)
+    rate_limit_fail_closed: bool = False  # False = fail-open (availability priority), True = fail-closed (security priority)
 
     # Database Connection Pool Settings
     db_pool_size: int = 25

@@ -161,6 +161,12 @@ class IPRateLimiting:
             raise
         except Exception as e:
             logger.warning(f"IPRateLimiting transient Redis fallback for {ip}: {e}")
+            if settings.rate_limit_fail_closed:
+                raise HTTPException(
+                    status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                    detail="Rate limiting service temporarily unavailable. Please retry shortly.",
+                    headers={"Retry-After": "5"}
+                )
             return
 
 

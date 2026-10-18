@@ -175,3 +175,44 @@ async def test_rate_limits_dynamically_configurable_by_env_settings(
     finally:
         settings.auth_rate_limit = orig_auth_limit
 
+
+@pytest.mark.asyncio
+async def test_rate_limit_fail_closed_and_fail_open_behavior(
+    client: httpx.AsyncClient
+):
+    """
+    Verifies that rate limiting fails open by default (protecting availability),
+    and can optionally fail closed (503) when RATE_LIMIT_FAIL_CLOSED=true.
+    """
+    from unittest.mock import MagicMock
+    from app.main import app
+    from app.core import redis as redis_client
+    from app.core.config import settings
+
+    # Simulate Redis failure during rate-limiting pipeline execution
+    broken_redis = MagicMock()
+    broken_redis.pipeline.side_effect = Exception("Redis connection refused")
+    broken_redis.get.side_effect = Exception("Redis connection refused")
+
+    orig_redis = app.dependency_overrides.get(redis_client.get_redis)
+    app.dependency_overrides[redis_client.get_redis] = lambda: broken_redis
+
+    try:
+        # 1. Fail Open (default)
+        settings.rate_limit_fail_closed = False
+        res_open = await client.get("/services?limit=1")
+        assert res_open.status_code == 200
+
+        # 2. Fail Closed (security priority)
+        settings.rate_limit_fail_closed = True
+        res_closed = await client.get("/services?limit=1")
+        assert res_closed.status_code == 503
+        assert res_closed.headers.get("retry-after") == "5"
+    finally:
+        settings.rate_limit_fail_closed = False
+        if orig_redis is not None:
+            app.dependency_overrides[redis_client.get_redis] = orig_redis
+        else:
+            app.dependency_overrides.pop(redis_client.get_redis, None)
+
+
