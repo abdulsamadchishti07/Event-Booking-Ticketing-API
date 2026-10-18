@@ -49,6 +49,11 @@ class Settings(BaseSettings):
     auth_rate_limit: int = 100     # 100 req/minute per IP for auth/login endpoints
     max_concurrent_auth_hashes: int = 10  # Max concurrent Argon2 hashes server-wide (CPU starvation guard)
 
+    # Database Connection Pool Settings
+    db_pool_size: int = 25
+    db_max_overflow: int = 25
+    db_pool_timeout: int = 10
+
     # Stripe Settings
     STRIPE_SECRET_KEY: str
     STRIPE_PUBLISHABLE_KEY: str
