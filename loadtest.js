@@ -6,6 +6,7 @@ import http from 'k6/http';
 import { check } from 'k6';
 import { SharedArray } from 'k6/data';
 import { Counter } from 'k6/metrics';
+import { textSummary } from 'https://jslib.k6.io/k6-summary/0.0.2/index.js';
 
 const ctx = JSON.parse(open('./loadctx.json'));
 const tokens = new SharedArray('tokens', () => ctx.tokens);
@@ -14,10 +15,14 @@ const BROWSE_RPS = parseInt(__ENV.BROWSE_RPS || '200');
 const BOOK_RPS = parseInt(__ENV.BOOK_RPS || '20');
 const HOLD = __ENV.HOLD || '3m';            // time at full rate
 const DROP_USERS = parseInt(__ENV.DROP_USERS || '2000');
+const SPOOF_IP = __ENV.SPOOF_IP === '1';
 
 const serverErrors = new Counter('server_errors_5xx');
 const seatsWon = new Counter('seats_won_201');
 const seatsLost = new Counter('seats_lost_409');
+const rateLimited429 = new Counter('rate_limited_429');
+const poolExhausted503 = new Counter('pool_exhausted_503');
+const internalError500 = new Counter('internal_error_500');
 
 export const options = {
   scenarios: {
@@ -54,9 +59,20 @@ export const options = {
 function hdr(i, auth) {
   const h = { 'Content-Type': 'application/json' };
   if (auth) h.Authorization = `Bearer ${tokens[i % tokens.length]}`;
+  if (SPOOF_IP) {
+    // Generate a unique IP per virtual user (for benchmarking directly against uvicorn)
+    const o2 = Math.floor(i / 256) % 256;
+    const o3 = i % 256;
+    h['X-Forwarded-For'] = `198.51.${o2}.${o3}`;
+  }
   return { headers: h };
 }
-function track(res) { if (res.status >= 500) serverErrors.add(1); }
+
+function track(res) {
+  if (res.status === 429) rateLimited429.add(1);
+  else if (res.status === 503) { poolExhausted503.add(1); serverErrors.add(1); }
+  else if (res.status >= 500) { internalError500.add(1); serverErrors.add(1); }
+}
 
 export function browse() {
   const r = Math.random();
@@ -91,6 +107,31 @@ export function book() {
 export function handleSummary(data) {
   const m = data.metrics;
   const won = m.seats_won_201 ? m.seats_won_201.values.count : 0;
-  console.log(`\nDROP RESULT: seats won=${won} (must be <= 500). If > 500 you have an OVERSELLING BUG.`);
-  return { 'summary.json': JSON.stringify(data, null, 2) };
+  const lost = m.seats_lost_409 ? m.seats_lost_409.values.count : 0;
+  const c503 = m.pool_exhausted_503 ? m.pool_exhausted_503.values.count : 0;
+  const c429 = m.rate_limited_429 ? m.rate_limited_429.values.count : 0;
+
+  const dropSummary = [
+    '',
+    '================================================================================',
+    'TICKET DROP SCENARIO REPORT:',
+    `  Seats Won (201):        ${won} (must be <= 500 seats; overselling if > 500)`,
+    `  Seats Lost (409):       ${lost} (conflicts / seat already taken)`,
+    `  Pool Exhausted (503):   ${c503} (DB connection pool timeout)`,
+    `  Rate Limited (429):     ${c429} (per-IP rate limit tripped)`,
+    '================================================================================',
+    ''
+  ].join('\n');
+
+  let defaultTxt = '';
+  try {
+    defaultTxt = textSummary(data, { indent: ' ', enableColors: true });
+  } catch (e) {
+    defaultTxt = 'Default summary formatting unavailable.';
+  }
+
+  return {
+    'stdout': defaultTxt + '\n' + dropSummary,
+    'summary.json': JSON.stringify(data, null, 2),
+  };
 }
