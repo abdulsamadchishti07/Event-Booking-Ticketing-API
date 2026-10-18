@@ -312,12 +312,15 @@ def seed_loadtest(num_users: int = 5000):
             "big": big_id
         }
 
-        output_path = os.path.abspath("loadctx.json")
+        base_dir = os.path.dirname(os.path.abspath(__file__))
+        output_path = os.path.join(base_dir, "loadctx.json")
         with open(output_path, "w", encoding="utf-8") as f:
             json.dump(ctx_data, f)
 
         # Also copy loadctx.json to tests/load_testing/loadctx.json for convenience
-        test_dir_ctx = os.path.abspath("tests/load_testing/loadctx.json")
+        test_dir = os.path.join(base_dir, "tests", "load_testing")
+        os.makedirs(test_dir, exist_ok=True)
+        test_dir_ctx = os.path.join(test_dir, "loadctx.json")
         with open(test_dir_ctx, "w", encoding="utf-8") as f:
             json.dump(ctx_data, f)
 
