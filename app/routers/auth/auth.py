@@ -109,7 +109,12 @@ async def login(
             headers={"WWW-Authenticate": "Bearer"},
         )
 
-    # Ensure account is verified before granting JWT
+    # Ensure account is active and verified before granting JWT
+    if not user.is_active:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Account has been deactivated."
+        )
     if not user.is_verified:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,

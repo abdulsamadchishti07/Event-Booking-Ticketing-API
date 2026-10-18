@@ -91,6 +91,7 @@ async def client(
     dependency overrides for database and Redis.
     """
     app.dependency_overrides[get_db] = lambda: db_session
+    app.dependency_overrides[oauth2.get_auth_session] = lambda: db_session
     app.dependency_overrides[redis_client.get_redis] = lambda: test_redis
 
     transport = httpx.ASGITransport(app=app)

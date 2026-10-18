@@ -382,7 +382,7 @@ async def search_services(
         joinedload(model.Services.location),
         joinedload(model.Services.seller),
         selectinload(model.Services.tiers)
-    ).join(model.Location)
+    ).join(model.Location).filter(model.Services.is_active == True)
 
     if city:
         query = query.filter(model.Location.city.ilike(f"%{city}%"))
@@ -468,7 +468,7 @@ async def get_service_seats(
     service = await run_in_threadpool(
         lambda: db.query(model.Services).filter(model.Services.id == service_id).first()
     )
-    if not service:
+    if not service or not service.is_active:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Service with id {service_id} not found"
@@ -536,7 +536,7 @@ async def get_service_by_id(
             .first()
         )
     )
-    if not service:
+    if not service or not service.is_active:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Service with id {service_id} not found"
@@ -733,25 +733,16 @@ def delete_service(
             detail=f"Cannot delete event with existing {active_booking.status.value} bookings"
         )
 
-    # Clean up any cancelled bookings associated with this service before deleting service
-    cancelled_bookings = db.query(model.Booking).filter(
-        model.Booking.service_id == service_id,
-        model.Booking.status == model.BookingStatus.CANCELLED
-    ).all()
-    for cb in cancelled_bookings:
-        if cb.payment:
-            db.query(model.Invoice).filter(model.Invoice.payment_id == cb.payment.id).delete()
-            db.delete(cb.payment)
-        if cb.cancellation:
-            db.delete(cb.cancellation)
-        if cb.review:
-            db.delete(cb.review)
-        cb.assigned_units.clear()
-        db.delete(cb)
-    db.flush()
-
-    db.delete(service)
-    db.commit()
+    # If the event has any booking history (e.g. cancelled), archive it to preserve financial audit trail
+    has_history = db.query(model.Booking).filter(
+        model.Booking.service_id == service_id
+    ).first()
+    if has_history:
+        service.is_active = False
+        db.commit()
+    else:
+        db.delete(service)
+        db.commit()
 
     background_tasks.add_task(invalidate_services_cache, service_id=service_id, redis=redis)
     return Response(status_code=status.HTTP_204_NO_CONTENT)

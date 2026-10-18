@@ -6,6 +6,7 @@ services:
     image: postgres:16-alpine
     container_name: event_booking_postgres
     restart: unless-stopped
+    command: postgres -c max_connections=250
     environment:
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD: postgres

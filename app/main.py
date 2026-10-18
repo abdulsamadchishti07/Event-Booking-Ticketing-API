@@ -1,6 +1,8 @@
 import asyncio
 from contextlib import asynccontextmanager
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
+from fastapi.responses import JSONResponse
+import sqlalchemy.exc
 
 from .routers import locations, services, bookings, payments, reviews
 from .routers.auth import auth, users
@@ -23,6 +25,16 @@ app = FastAPI(
     version="1.0.0",
     lifespan=lifespan
 )
+
+
+@app.exception_handler(sqlalchemy.exc.TimeoutError)
+async def db_pool_timeout_handler(request: Request, exc: sqlalchemy.exc.TimeoutError):
+    return JSONResponse(
+        status_code=503,
+        content={"detail": "Database connection pool exhausted. Please retry shortly."},
+        headers={"Retry-After": "2"}
+    )
+
 
 # Include API routers
 app.include_router(users.router)

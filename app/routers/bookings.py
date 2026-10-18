@@ -74,7 +74,7 @@ def create_booking(
 
     # 1. Fetch the service
     service = db.query(model.Services).filter(model.Services.id == booking_in.service_id).first()
-    if not service:
+    if not service or not service.is_active:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Service with id {booking_in.service_id} not found"

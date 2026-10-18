@@ -219,8 +219,9 @@ async def test_high_concurrency_booking_race_condition(client: httpx.AsyncClient
         "end_time": (now + timedelta(days=2, hours=2)).isoformat()
     }
 
-    # Remove get_db override so every request opens a separate SessionLocal connection
+    # Remove get_db and get_auth_session overrides so every request opens separate SessionLocal connections
     orig_override = app.dependency_overrides.pop(get_db, None)
+    orig_auth_override = app.dependency_overrides.pop(oauth2.get_auth_session, None)
 
     try:
         tasks = [client.post("/bookings", headers=user_headers, json=payload) for _ in range(25)]
@@ -239,6 +240,8 @@ async def test_high_concurrency_booking_race_condition(client: httpx.AsyncClient
     finally:
         if orig_override is not None:
             app.dependency_overrides[get_db] = orig_override
+        if orig_auth_override is not None:
+            app.dependency_overrides[oauth2.get_auth_session] = orig_auth_override
         _cleanup_committed_event(data)
 
 
@@ -257,7 +260,9 @@ async def test_slot_capacity_concurrency_race_condition(client: httpx.AsyncClien
         "quantity": 1
     }
 
+    # Remove get_db and get_auth_session overrides so every request opens separate SessionLocal connections
     orig_override = app.dependency_overrides.pop(get_db, None)
+    orig_auth_override = app.dependency_overrides.pop(oauth2.get_auth_session, None)
 
     try:
         tasks = [client.post("/bookings", headers=user_headers, json=payload) for _ in range(25)]
@@ -279,6 +284,8 @@ async def test_slot_capacity_concurrency_race_condition(client: httpx.AsyncClien
     finally:
         if orig_override is not None:
             app.dependency_overrides[get_db] = orig_override
+        if orig_auth_override is not None:
+            app.dependency_overrides[oauth2.get_auth_session] = orig_auth_override
         _cleanup_committed_event(data)
 
 

@@ -206,10 +206,11 @@ def create_payment_intent_for_booking(
             except Exception as e:
                 logger.warning(f"Could not retrieve Stripe intent {existing_payment.stripe_payment_intent_id}: {e}")
 
-    # 6. Calculate total amount (Zero-Trust Server Calculation)
-    # Unit-assigned bookings MUST price from the seats' own tiers to prevent tier manipulation
+    # 6. Calculate total amount: prioritize snapshotted booking.total_amount to honor locked price
     total_amount: Decimal = Decimal("0.00")
-    if booking.assigned_units:
+    if booking.total_amount is not None:
+        total_amount = Decimal(booking.total_amount)
+    elif booking.assigned_units:
         total_amount = sum(
             Decimal(unit.tier.price) if unit.tier else Decimal(booking.service.base_price)
             for unit in booking.assigned_units

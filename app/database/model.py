@@ -4,6 +4,7 @@ from decimal import Decimal
 from typing import List, Optional
 
 from sqlalchemy import (
+    Boolean,
     CheckConstraint,
     Column,
     Date,
@@ -77,6 +78,9 @@ class User(Base):
 
     is_verified: Mapped[bool] = mapped_column(
         default=False, server_default=text("false")
+    )
+    is_active: Mapped[bool] = mapped_column(
+        Boolean, default=True, server_default=text("true"), nullable=False
     )
 
     verification_otp: Mapped[Optional[str]] = mapped_column(String(6))
@@ -187,6 +191,9 @@ class Services(Base):
     )
     end_time: Mapped[datetime] = mapped_column(
         TIMESTAMP(timezone=True), nullable=False
+    )
+    is_active: Mapped[bool] = mapped_column(
+        Boolean, default=True, server_default=text("true"), nullable=False
     )
 
     seller: Mapped["SellerProfile"] = relationship(back_populates="services")

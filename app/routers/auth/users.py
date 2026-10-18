@@ -482,7 +482,8 @@ async def delete_user(
         user.name = "Deleted User"
         user.email = f"deleted_{user.id}_{int(datetime.now(timezone.utc).timestamp())}@deleted.local"
         user.phone_no = None
-        user.password = "DELETED_USER_ACCOUNT"
+        user.password_hash = utils.hash(secrets.token_urlsafe(32))
+        user.is_verified = False
         user.is_active = False
         await run_in_threadpool(db.commit)
     else:
@@ -672,6 +673,7 @@ def become_seller(
     # 3. Upgrade user role to SELLER (unless they are already an ADMIN)
     if current_user.role != model.UserRole.ADMIN:
         current_user.role = model.UserRole.SELLER
+        db.query(model.User).filter(model.User.id == current_user.id).update({model.User.role: model.UserRole.SELLER})
 
     try:
         db.commit()

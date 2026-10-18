@@ -8,17 +8,21 @@ This document provides empirical benchmark data, architectural analysis, and the
 
 ```
 ================================================================================
-  STANDALONE MEASURED CAPACITY (1 Node: 4 ASGI Workers, Postgres 16, Redis 7.2):
-  - Peak Origin Read Throughput: 1,545.3 Requests / Second (Redis cache hit)
-  - Booking Hold Throughput: ~160 Requests / Second (Postgres SELECT FOR UPDATE)
-  - Auth Login Throughput: 25 – 30 Requests / Second (Argon2id CPU cost)
-  - Standalone Supported CCU: 5,000 – 10,000 Concurrent Active Users (at 6.5s think time)
+  STANDALONE MEASURED CAPACITY (1 Node: 2–4 Cores, 4 ASGI Workers, Postgres 16, Redis 7.2):
+  - Cached Reads (Redis hit): ~1,300 – 1,545 Requests / Second
+  - Cache Misses (Uncached DB Queries): ~250 – 300 Requests / Second
+  - Hot Booking Transactions (Pessimistic Row Locks): ~90 – 100 Requests / Second
+  - Auth Login Throughput (Argon2id CPU bound): ~7 – 25 Requests / Second
+  - Standalone Browsing CCU: 5,000 – 10,000 Concurrent Active Users (browsing only, 6.5s think time)
+  - Standalone Hot-Booking CCU: ~500 – 600 Concurrent Active Buyers racing on a single hot event
   - Total Discovery Requests Tested: 85,076 requests in 55.1 seconds (100% success)
   - Origin Cache Hit Ratio: 99.998% (56,506 hits vs 1 miss on cached endpoints)
 
-  DISTRIBUTED TARGET CAPACITY (Horizontally Scaled + Edge CDN + Read Replicas):
-  - Theoretical System Capacity: 15,453 Requests / Second (with 90% CDN offload)
-  - Target Concurrency: 100,000+ Concurrent Active Users (CCU)
+  DISTRIBUTED TARGET CAPACITY (Horizontally Scaled + Edge CDN + DB Read Replicas):
+  - Theoretical System Capacity: 15,453 Requests / Second (with 90% CDN edge offload)
+  - Target Concurrency: 100,000+ Concurrent Active Users (CCU) across the distributed cluster
+  - Important: 100K CCU is an ecosystem-level capacity target for distributed deployments,
+    NOT 100K active users on a single 2-core standalone node.
 ================================================================================
 ```
 
@@ -240,15 +244,22 @@ docker run --rm -i --network=host \
 ---
 
 ## 9. How Anyone Can Reproduce These Results
+ 
+### ⚠️ Note on Nginx Anti-Spoofing & Local Rate Limiting
+Production Nginx is hardened against IP spoofing: it enforces `proxy_set_header X-Forwarded-For $remote_addr;`, overwriting client-sent `X-Forwarded-For` headers. When running k6 from a single client machine against Nginx on port 80, all virtual users share the runner's IP and will trip the atomic rate limiter (`120 req/min/IP`).
+To run local load benchmarks without hitting the single-IP rate limit:
+- **Option A (Recommended for stress testing)**: Set `SERVICES_RATE_LIMIT=100000` in `.env` before booting the stack (`docker compose up -d`).
+- **Option B**: Point k6 directly to the internal application container if testing origin throughput directly.
 
+### Steps to Reproduce:
 1. **Clone the repository**:
    ```bash
    git clone https://github.com/abdulsamadchishti07/Event-Booking-Ticketing-API.git
    cd "Event Booking - Ticketing API"
    ```
-2. **Start Docker Compose stack**:
+2. **Start Docker Compose stack** (with rate limiting raised for benchmarking):
    ```bash
-   docker compose up -d --build
+   SERVICES_RATE_LIMIT=100000 docker compose up -d --build
    ```
 3. **Seed test database**:
    ```bash

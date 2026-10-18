@@ -1,14 +1,14 @@
 import uuid
 from datetime import datetime, timedelta, timezone
-from typing import Annotated
+from typing import Annotated, Generator
 
 from fastapi import Depends, HTTPException, status
 from fastapi.security import OAuth2PasswordBearer
 import jwt
 from jwt.exceptions import PyJWTError
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, joinedload
 
-from app.database import get_db, model
+from app.database import get_db, model, SessionLocal
 from . import redis
 from .config import settings
 
@@ -107,14 +107,25 @@ async def is_token_blacklisted(token: str) -> bool:
     return False
 
 
+def get_auth_session() -> Generator[Session | None, None, None]:
+    """
+    FastAPI dependency that provides a DB session for authentication.
+    Yields None by default (production), prompting get_current_user to use a short-lived
+    SessionLocal() context manager so that the database connection is immediately released
+    back to the pool once the user record is loaded.
+    In testing, this dependency can be overridden to supply the transactional test session.
+    """
+    yield None
+
+
 async def get_current_user(
     token: Annotated[str, Depends(oauth2_scheme)],
-    db: Annotated[Session, Depends(get_db)]
+    auth_db: Annotated[Session | None, Depends(get_auth_session)] = None
 ) -> model.User:
     """
     Dependency that decodes the JWT bearer token, extracts user ID,
     and returns the authenticated User instance.
-    Runs sync DB queries on threadpool to avoid blocking the asyncio event loop.
+    Uses a short-lived DB session to avoid holding a connection during slow/sync endpoints.
     """
     credentials_exception = HTTPException(
         status_code=status.HTTP_401_UNAUTHORIZED,
@@ -152,9 +163,37 @@ async def get_current_user(
                 headers={"WWW-Authenticate": "Bearer"}
             )
 
-    user = await run_in_threadpool(lambda: db.query(model.User).filter(model.User.id == int(user_id)).first())
+    if auth_db is not None:
+        user = await run_in_threadpool(
+            lambda: auth_db.query(model.User)
+            .options(joinedload(model.User.seller_profile))
+            .filter(model.User.id == int(user_id))
+            .first()
+        )
+    else:
+        def _fetch_user():
+            with SessionLocal() as session:
+                u = (
+                    session.query(model.User)
+                    .options(joinedload(model.User.seller_profile))
+                    .filter(model.User.id == int(user_id))
+                    .first()
+                )
+                if u is not None:
+                    session.expunge(u)
+                return u
+
+        user = await run_in_threadpool(_fetch_user)
+
     if user is None:
         raise credentials_exception
+
+    if not user.is_active:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Account has been deactivated",
+            headers={"WWW-Authenticate": "Bearer"}
+        )
 
     return user
 
@@ -179,7 +218,7 @@ get_verifyied_user = get_verified_user
 
 async def get_optional_current_user(
     token: Annotated[str | None, Depends(oauth2_scheme_optional)],
-    db: Annotated[Session, Depends(get_db)],
+    auth_db: Annotated[Session | None, Depends(get_auth_session)] = None,
 ) -> model.User | None:
     """
     Optional authentication dependency: returns the User if a valid token is provided,
@@ -201,8 +240,30 @@ async def get_optional_current_user(
             token_iat = payload.get("iat", 0)
             if token_iat < float(user_revoked_at):
                 return None
-        user = await run_in_threadpool(lambda: db.query(model.User).filter(model.User.id == int(user_id)).first())
-        return user if (user and user.is_verified) else None
+
+        if auth_db is not None:
+            user = await run_in_threadpool(
+                lambda: auth_db.query(model.User)
+                .options(joinedload(model.User.seller_profile))
+                .filter(model.User.id == int(user_id))
+                .first()
+            )
+        else:
+            def _fetch_user():
+                with SessionLocal() as session:
+                    u = (
+                        session.query(model.User)
+                        .options(joinedload(model.User.seller_profile))
+                        .filter(model.User.id == int(user_id))
+                        .first()
+                    )
+                    if u is not None:
+                        session.expunge(u)
+                    return u
+
+            user = await run_in_threadpool(_fetch_user)
+
+        return user if (user and user.is_verified and user.is_active) else None
     except PyJWTError:
         return None
 
