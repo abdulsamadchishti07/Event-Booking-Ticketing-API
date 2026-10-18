@@ -474,17 +474,36 @@ async def delete_user(
                 detail="Cannot delete account: you have active events with associated bookings."
             )
 
-    # If user has past (cancelled) bookings, anonymize to preserve historical FK integrity; otherwise hard delete
+    # Check if user has past (cancelled) bookings as customer
     has_any_bookings = await run_in_threadpool(
         lambda: db.query(model.Booking).filter(model.Booking.user_id == user.id).first()
     )
-    if has_any_bookings:
+
+    # Check if seller has any events with associated booking history
+    seller_has_event_bookings = False
+    if had_seller_profile:
+        seller_has_event_bookings = await run_in_threadpool(
+            lambda: db.query(model.Booking).join(model.Services).filter(
+                model.Services.seller_id == user.seller_profile.id
+            ).first() is not None
+        )
+
+    # If user has past bookings or is a seller, anonymize/deactivate and archive events to preserve audit trail
+    if has_any_bookings or had_seller_profile or seller_has_event_bookings:
         user.name = "Deleted User"
         user.email = f"deleted_{user.id}_{int(datetime.now(timezone.utc).timestamp())}@deleted.local"
         user.phone_no = None
         user.password_hash = utils.hash(secrets.token_urlsafe(32))
         user.is_verified = False
         user.is_active = False
+
+        if had_seller_profile:
+            def _archive_seller_events():
+                db.query(model.Services).filter(
+                    model.Services.seller_id == user.seller_profile.id
+                ).update({model.Services.is_active: False})
+            await run_in_threadpool(_archive_seller_events)
+
         await run_in_threadpool(db.commit)
     else:
         await run_in_threadpool(db.delete, user)
