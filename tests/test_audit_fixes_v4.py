@@ -106,10 +106,23 @@ async def test_stripe_webhook_slot_capacity_ignores_expired_pending_holds(
     assert svc_res.status_code == 201
     svc_id = svc_res.json()["id"]
 
-    # 2. Create an EXPIRED hold for User A (quantity = 1, created 20 minutes ago)
+    # 2. Create a real User A and an EXPIRED hold for User A (quantity = 1, created 20 minutes ago)
+    user_a = model.User(
+        name="User A Hold",
+        email="usera_hold_v4@example.com",
+        password_hash="fakehash_usera",
+        dob=datetime.now(timezone.utc).date() - timedelta(days=365 * 25),
+        role=model.UserRole.CUSTOMER,
+        phone_no="+1000999888",
+        is_verified=True,
+    )
+    db_session.add(user_a)
+    db_session.commit()
+    db_session.refresh(user_a)
+
     expired_booking = model.Booking(
         service_id=svc_id,
-        user_id=1,  # arbitrary user id
+        user_id=user_a.id,
         quantity=1,
         status=model.BookingStatus.PENDING,
         created_at=now - timedelta(minutes=20),
