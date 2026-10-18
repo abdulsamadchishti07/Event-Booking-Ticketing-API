@@ -9,25 +9,36 @@ This report documents the performance, capacity limits, bottleneck analysis, and
 | Concurrency Tier | Virtual Users (Distinct IPs) | Throughput (RPS) | Median Latency | p95 Latency | Success Rate | System Behavior |
 | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
 | **Optimal Baseline** | **100 VUs** | **956.5 req/s** | **5.03 ms** | **19.72 ms** | **100.00%** (0 fails) | Blazing fast, zero queuing, 99.87% cache hit ratio. |
-| **High Capacity** | **200 VUs** | **1,425.2 req/s** | **36.69 ms** | **90.85 ms** | **99.96%** (0.04% fail) | Highly stable, 5.1 MB/s gzip transfer, sub-100ms p95. |
-| **Peak Stress Spike** | **500 VUs** | **1,160.7 req/s** | **66.94 ms** | **229.45 ms** | **99.93%** (0.07% fail) | 81,355 total requests served, minor worker queue delay. |
+| **High Capacity** | **200 VUs** | **1,425.2 req/s** | **36.69 ms** | **90.85 ms** | **99.96%** (0.04% fail) | Highly stable sweet spot, sub-100ms p95. |
+| **Peak Stress Spike** | **500 VUs** | **1,160.7 req/s** | **66.94 ms** | **229.45 ms – 819.00 ms** | **99.93%** (0.07% fail) | 81,355 total requests served; tail latency reaches 819 ms under cold cache / thread contention. |
 | **Full User Lifecycle (Locust)** | **50 VUs** (Auth + Holds) | **67.7 req/s** | **11.00 ms** | **39.00 ms** | **99.70%** | Full journey: login, profile, seat maps, hold booking, cancel. |
+| **Hot Drop Booking Spike** | **300 VUs racing 1 event** | **62 – 100 req/s** | **165.00 ms** | **2,300.00 ms** | **100.00%** (50 wins, 250 409s) | PostgreSQL row-lock serialization (`SELECT FOR UPDATE`). Zero overselling. |
+
+> [!IMPORTANT]
+> **Why Throughput and Latency Metrics Cannot Be Combined Into a Single Blanket Guarantee**:
+> System capacity is non-linear and endpoint-specific:
+> 1. High throughput (**1,200–1,500 RPS**) is achieved on cached read endpoints (`/services`, `/locations`) where Redis serves responses directly in ~2–5ms.
+> 2. Latency under peak concurrency degrades non-linearly: while p95 is **~20 ms at 100 VUs** and **~91 ms at 200 VUs**, it climbs to **230 ms – 819 ms at 500 VUs** as the 4 Uvicorn worker event loops and OS CPU scheduler contend for threads.
+> 3. Write endpoints competing on a single hot event (`POST /bookings`) serialize at **62–100 holds/sec** due to database row-level locking.
+> 4. Auth verification (`POST /login`) is bounded at **4–7 logins/sec** due to Argon2id CPU costs and the 10-slot concurrency cap.
+> These distinct operational limits must not be combined into a single blanket capacity figure.
 
 ### 🏆 Key Takeaways:
 1. **Sweet Spot**: The system comfortably sustains **100 to 200 concurrent users from 200 distinct IPs** delivering **~1,425 requests per second** with **p95 latency under 90ms** and **99.96%+ success rate**.
-2. **Maximum Capacity Limit**: With 4 Uvicorn worker processes on a single instance, the maximum capacity ceiling is **~500 concurrent users**. Beyond 500 users, CPU scheduling across the 4 python worker processes causes incoming connections to queue up, increasing p95 latency to ~229ms.
-3. **Multi-IP Isolation**: Rate limiting operates via atomic Redis pipelines keyed by client IP (`Rate_Limit:{ip}:{endpoint}`). Simulated traffic across distinct IP subnets demonstrated 100% quota isolation—users on separate IPs do not cross-pollinate or deplete each other's quota.
+2. **Maximum Capacity Limit**: With 4 Uvicorn worker processes on a single instance, the maximum capacity ceiling is **~500 concurrent users**. Beyond 500 users, CPU scheduling across the 4 python worker processes causes incoming connections to queue up, increasing p95 latency up to ~819ms under heavy contention.
+3. **PostgreSQL Row-Lock Serialization on Hot Drops**: Requests for the same event's seats use row-level locks (`SELECT FOR UPDATE`) to guarantee zero overselling. On a single PostgreSQL instance, concurrent holds for one event cap at ~62–100 holds/sec.
+4. **Multi-IP Isolation & Configurable Fail-Mode**: Rate limiting operates via atomic Redis pipelines keyed by client IP (`Rate_Limit:{ip}:{endpoint}`). Quota isolation is verified via reverse-proxy `TRUSTED_PROXIES` handling. By default, rate limiting fails open to preserve API availability; setting `RATE_LIMIT_FAIL_CLOSED=true` enables strict security mode (HTTP 503).
 
 ---
 
 ## 2. Issues Discovered and Resolved
 
-During testing and audit, five critical bottlenecks and issues were identified and permanently resolved:
+During testing and audit, seven critical bottlenecks and issues were identified and permanently resolved:
 
 ### 1. Pytest Deprecation Warning in HTTPX Client
 - **Problem**: `httpx` threw `DeprecationWarning: Setting per-request cookies=<...> is being deprecated` across 5 test suites.
 - **Fix**: Updated `tests/test_qa_probe.py` and `tests/test_v2_review_fixes.py` to set cookies directly on the `AsyncClient` instance rather than per-request kwargs.
-- **Verification**: `197 passed, 0 warnings` in pytest.
+- **Verification**: All deprecation warnings resolved.
 
 ### 2. Unit Test Rate Limiter Override Failure
 - **Problem**: `tests/test_caching.py::test_services_rate_limiting_protection` failed (`assert 200 == 429`) because `SERVICES_RATE_LIMIT=10000` was present in the local `.env` file, overriding the default 120 req/min rule tested in the test suite.
@@ -43,6 +54,7 @@ During testing and audit, five critical bottlenecks and issues were identified a
 - **Fix**:
   1. Increased `max_connections` from **30 to 200** in `app/core/redis.py`.
   2. Wrapped `IPRateLimiting` Redis pipeline execution in a fail-open `try...except` block so transient Redis connection pool saturation falls back gracefully rather than crashing the request with a 500 error.
+  3. Added configurable `RATE_LIMIT_FAIL_CLOSED` setting (default `false`) for environments requiring strict fail-closed enforcement (HTTP 503).
 - **Verification**: Failure rate at 500 VUs dropped from 0.21% down to 0.07% (over 81,300 requests).
 
 ### 4. Nginx Upstream Keepalive Starvation
@@ -50,8 +62,17 @@ During testing and audit, five critical bottlenecks and issues were identified a
 - **Fix**: Increased Nginx upstream keepalive pool to `keepalive 128;`.
 - **Verification**: TCP connection resets dropped by over 65%.
 
-### 5. Automated Test Suite Health
-- **Result**: **197 passed in 38.41s** (100% test pass rate, 0 failures, 0 warnings).
+### 5. PostgreSQL Row-Lock Contention on Hot Drops
+- **Problem**: When 300 virtual users raced for 50 seats on a single event, `with_for_update()` caused database transactions to queue up. With default `pool_timeout=5s`, 35–38% of drop requests failed with HTTP 503 connection pool timeouts.
+- **Fix**: Raised SQLAlchemy `pool_size=25`, `max_overflow=25`, and `pool_timeout=10s` (with Postgres `max_connections=200`). Under 300 concurrent requests, exactly 50 seats were awarded, 250 requests received clean HTTP 409 conflicts, and zero 500/503 errors occurred.
+- **Architectural Note**: For drops exceeding 500+ simultaneous holds per second on a single event, holds must be decoupled from PostgreSQL row locks via Redis atomic token counters or an asynchronous reservation queue (see [SCALING_100K.md](SCALING_100K.md)).
+
+### 6. CPU Starvation on Concurrent Password Hashing
+- **Problem**: Argon2id password hashing consumes ~150–300ms of intensive CPU per hash. Multiple concurrent `/login` requests saturated CPU cores and starved event loops.
+- **Fix**: Added a server-wide Redis concurrency semaphore (`concurrency:auth_hash`, capped at 10 slots). Excess login requests immediately return `HTTP 429 Too Many Requests` with `Retry-After: 2` rather than crashing or freezing the server.
+
+### 7. Automated Test Suite Health
+- **Result**: **206 passed in 32.69s** (100% test pass rate, 0 failures, 0 warnings).
 
 ---
 

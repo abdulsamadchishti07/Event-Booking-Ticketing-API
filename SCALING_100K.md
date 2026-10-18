@@ -18,9 +18,19 @@ To answer your question accurately, we must differentiate between the different 
 ### 📈 Current Measured Performance (Sprint 6 Benchmark on Single Machine):
 - **Web Workers**: 1 Container, 4 Uvicorn ASGI workers.
 - **Optimal Concurrency**: **100–200 concurrent users** across 200 distinct IPs.
-- **Maximum Throughput**: **1,425 requests per second (RPS)**.
-- **Stress Ceiling**: **500 concurrent users** (1,160 RPS, p95 latency: ~229ms).
+- **Throughput by Endpoint**:
+  - **Cached Event Discovery & Seat Maps (`GET /services`, `GET /seats`)**: **1,200–1,500 requests per second (RPS)**.
+  - **Hot Drop Seat Reservations (`POST /bookings`)**: **62–100 holds/second** on a single event (serialized by PostgreSQL row locks).
+  - **Password Hashing (`POST /login`)**: **4–7 logins/second** (CPU bound, 10-slot concurrency cap).
+- **Latency Profile Across Concurrency Tiers**:
+  - **100 VUs**: ~956 RPS, median 5.0ms, p95 **19.7ms** (100% success).
+  - **200 VUs (Sweet Spot)**: ~1,425 RPS, median 36.7ms, p95 **90.9ms** (99.96% success).
+  - **500 VUs (Saturation Point)**: ~1,160–1,200 RPS, median 66.9ms, p95 **229ms – 819ms** (tail latency scales with CPU scheduling and cache warmness).
 - **Cache Hit Latency**: **1.7ms to 5.0ms** (Redis read-through).
+
+> [!IMPORTANT]
+> **Capacity Numbers Must Not Be Combined Into a Single Blanket Guarantee**:
+> The 1,200–1,500 RPS figure reflects cached read throughput under 200 VUs. Under 500 VUs, thread contention pushes p95 latency up to 819 ms. Meanwhile, hot booking drops serialize at ~62–100 holds/sec on PostgreSQL row locks. These figures represent distinct operational limits of different subsystems and must not be conflated into a single guaranteed performance promise.
 
 ### 🛑 What Breaks on the Current Single Container if 100K Users Hit It Right Now?
 1. **Linux File Descriptors (`ulimit -n`)**:
@@ -29,10 +39,14 @@ To answer your question accurately, we must differentiate between the different 
    - Linux default ephemeral port range (`net.ipv4.ip_local_port_range`) has only ~28,000 ports available. 100K outgoing/incoming connections exhaust all socket ports.
 3. **Uvicorn Python Event Loop Queue Saturation**:
    - 4 Python worker processes running on a single event loop can handle ~400–500 concurrent coroutines per worker before GIL and CPU context-switching delay requests. 100K connections would cause massive timeouts (504 Gateway Timeout).
-4. **PostgreSQL Direct Connection Limit**:
-   - PostgreSQL default `max_connections` is **100**. If 100K users attempt database writes or cache misses, Postgres will crash with `FATAL: sorry, too many clients already`.
-5. **Load Generator Hardware Limits**:
-   - A single laptop or client machine running k6/Locust cannot physically generate 100,000 real HTTP connections simultaneously without saturating its own network interface and CPU.
+4. **PostgreSQL Row-Lock Serialization on Hot Drops**:
+   - Competing for seats on the same event serializes on PostgreSQL row locks (`SELECT FOR UPDATE`), capping single-node throughput at ~62–100 holds/sec. High-concurrency drops cause connection pool queueing unless decoupled via Redis atomic counters or reservation queues.
+5. **PostgreSQL Direct Connection Limit**:
+   - PostgreSQL default `max_connections` is **100** (configured to **200** in Docker Compose). Direct database traffic from 100K users without PgBouncer multiplexing crashes Postgres with `FATAL: sorry, too many clients already`.
+6. **Rate Limiter Fail-Mode Trade-Off**:
+   - Redis rate limiting fails open by default to preserve API availability. During severe Redis outages, requests bypass rate limits unless `RATE_LIMIT_FAIL_CLOSED=true` is set (which returns HTTP 503 instead).
+7. **Load Generator Hardware Limits**:
+   - A single laptop or client machine running k6/Locust cannot physically generate 100,000 real HTTP connections simultaneously without saturating its own network interface and CPU. Single-machine load tests exercise cached reads, not an end-to-end 100K CCU certification.
 
 ---
 

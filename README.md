@@ -151,7 +151,7 @@ Empirical benchmarks run via `tests/load_testing/k6_per_api_benchmarks.js` and `
 
 ## 🧪 Testing
 
-Run the comprehensive automated test suite (197 tests passing with 0 warnings):
+Run the comprehensive automated test suite (206 tests passing with 0 warnings):
 
 ```bash
 uv run pytest
