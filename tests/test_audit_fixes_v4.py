@@ -241,11 +241,15 @@ async def test_update_location_invalidates_services_cache(
     Updating a location's city/country via PUT /locations/{id} must invalidate
     the public services discovery cache (GET /services).
     """
-    # 1. Create location and service
+    # 1. Create location and service with unique city name to isolate from seed data
+    ts = int(datetime.now().timestamp() * 1000)
+    city_a = f"CacheCityA_{ts}"
+    city_b = f"CacheCityB_{ts}"
+
     loc_res = await client.post(
         "/locations",
         headers=seller_headers,
-        json={"city": "Quetta", "country": "PK", "address_line": "Venue 1"}
+        json={"city": city_a, "country": "PK", "address_line": "Venue 1"}
     )
     loc_id = loc_res.json()["id"]
     now = datetime.now(timezone.utc)
@@ -263,27 +267,27 @@ async def test_update_location_invalidates_services_cache(
         }
     )
 
-    # 2. Cache query with city=Quetta
-    r1 = await client.get("/services?city=Quetta")
+    # 2. Cache query with city=city_a
+    r1 = await client.get(f"/services?city={city_a}")
     assert r1.status_code == 200
     assert r1.headers.get("X-Cache") == "MISS"
     assert len(r1.json()) >= 1
 
-    r2 = await client.get("/services?city=Quetta")
+    r2 = await client.get(f"/services?city={city_a}")
     assert r2.status_code == 200
     assert r2.headers.get("X-Cache") == "HIT"
 
-    # 3. Update location city to Gwadar
-    up_res = await client.put(f"/locations/{loc_id}", headers=seller_headers, json={"city": "Gwadar"})
+    # 3. Update location city to city_b
+    up_res = await client.put(f"/locations/{loc_id}", headers=seller_headers, json={"city": city_b})
     assert up_res.status_code == 200
 
-    # 4. Searching for Quetta must miss cache and return empty
-    r3 = await client.get("/services?city=Quetta")
+    # 4. Searching for city_a must miss cache and return empty
+    r3 = await client.get(f"/services?city={city_a}")
     assert r3.status_code == 200
     assert r3.headers.get("X-Cache") == "MISS"
     assert len(r3.json()) == 0
 
-    # 5. Searching for Gwadar must return the event
-    r4 = await client.get("/services?city=Gwadar")
+    # 5. Searching for city_b must return the event
+    r4 = await client.get(f"/services?city={city_b}")
     assert r4.status_code == 200
     assert any(item["service_name"] == "Cached Venue Event" for item in r4.json())
