@@ -35,7 +35,7 @@ MAX_PENDING_HOLDS_PER_USER = 5
     dependencies=[
         Depends(
             redis_client.IPRateLimiting(
-                max_requests=60,
+                max_requests=lambda: settings.bookings_rate_limit,
                 window_seconds=60
             )
         )

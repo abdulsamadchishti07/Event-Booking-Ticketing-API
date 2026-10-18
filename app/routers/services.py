@@ -304,7 +304,7 @@ def bulk_create_inventory(
     dependencies=[
         Depends(
             IPRateLimiting(
-                max_requests=settings.services_rate_limit,
+                max_requests=lambda: settings.services_rate_limit,
                 window_seconds=60
             )
         )
@@ -445,7 +445,7 @@ async def search_services(
     dependencies=[
         Depends(
             IPRateLimiting(
-                max_requests=settings.services_rate_limit,
+                max_requests=lambda: settings.services_rate_limit,
                 window_seconds=60
             )
         )

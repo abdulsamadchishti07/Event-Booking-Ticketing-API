@@ -31,7 +31,7 @@ DUMMY_PASSWORD_HASH = utils.hash("timing_attack_mitigation_dummy_password")
     dependencies=[
         Depends(
             redis_client.IPRateLimiting(
-                max_requests=100,
+                max_requests=lambda: settings.auth_rate_limit,
                 window_seconds=60
             )
         )
@@ -70,10 +70,37 @@ async def login(
             detail=f"Account is temporarily locked due to multiple failed login attempts across multiple sources. Please try again in {ttl} seconds."
         )
 
-    # 2. Find user and verify password in constant-time
+    # 2. Find user and verify password with concurrent hashing cap (protects against CPU starvation)
     user = await run_in_threadpool(lambda: db.query(model.User).filter(func.lower(model.User.email) == email_clean).first())
     password_to_check = user.password_hash if user else DUMMY_PASSWORD_HASH
-    is_valid_password = await run_in_threadpool(utils.verify_password, user_credentials.password, password_to_check)
+
+    acquired_hash_slot = False
+    if redis_client.redis_client:
+        try:
+            active_hashes = await redis_client.redis_client.incr("concurrency:auth_hash")
+            if active_hashes == 1:
+                await redis_client.redis_client.expire("concurrency:auth_hash", 10)
+            if active_hashes > settings.max_concurrent_auth_hashes:
+                await redis_client.redis_client.decr("concurrency:auth_hash")
+                raise HTTPException(
+                    status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                    detail="Server is busy processing authentication requests. Please try again shortly.",
+                    headers={"Retry-After": "2"}
+                )
+            acquired_hash_slot = True
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.warning(f"Failed to check concurrent auth hash limit: {e}")
+
+    try:
+        is_valid_password = await run_in_threadpool(utils.verify_password, user_credentials.password, password_to_check)
+    finally:
+        if acquired_hash_slot and redis_client.redis_client:
+            try:
+                await redis_client.redis_client.decr("concurrency:auth_hash")
+            except Exception:
+                pass
 
     if not user or not is_valid_password:
         failed_attempts = await redis_client.redis_client.incr(failed_key_ip)

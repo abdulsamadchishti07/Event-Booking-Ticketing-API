@@ -44,6 +44,10 @@ class Settings(BaseSettings):
     cache_services_ttl: int = 300  # 5 minutes for event discovery listings and details
     cache_seats_ttl: int = 30      # 30 seconds for live seat maps
     services_rate_limit: int = 120 # 120 req/minute per IP for discovery endpoints
+    bookings_rate_limit: int = 60  # 60 req/minute per IP for booking holds
+    payments_rate_limit: int = 60  # 60 req/minute per IP for payment endpoints
+    auth_rate_limit: int = 100     # 100 req/minute per IP for auth/login endpoints
+    max_concurrent_auth_hashes: int = 10  # Max concurrent Argon2 hashes server-wide (CPU starvation guard)
 
     # Stripe Settings
     STRIPE_SECRET_KEY: str

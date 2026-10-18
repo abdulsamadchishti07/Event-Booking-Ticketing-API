@@ -92,7 +92,7 @@ def confirm_booking_and_invoice(
     dependencies=[
         Depends(
             redis_client.IPRateLimiting(
-                max_requests=60,
+                max_requests=lambda: settings.payments_rate_limit,
                 window_seconds=60
             )
         )

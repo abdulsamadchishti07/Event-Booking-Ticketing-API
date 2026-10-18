@@ -46,9 +46,11 @@ export const options = {
   },
 };
 
-// Pretend each request comes from a different client. This only works if the test traffic goes
-// through your nginx (which overwrites X-Forwarded-For). Without it, all users share one IP and
-// your rate limiter will (correctly) block them.
+// Note on Rate Limiting:
+// When running k6 from a single runner against Nginx, all virtual users share the runner's IP
+// (since Nginx overwrites X-Forwarded-For with $remote_addr). For high-throughput single-runner
+// load tests, set BOOKINGS_RATE_LIMIT=100000, SERVICES_RATE_LIMIT=100000, AUTH_RATE_LIMIT=100000
+// in your app environment, or distribute k6 across multiple runner machines.
 function hdr(i, auth) {
   const h = { 'Content-Type': 'application/json' };
   if (auth) h.Authorization = `Bearer ${tokens[i % tokens.length]}`;

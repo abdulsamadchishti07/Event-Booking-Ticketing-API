@@ -108,3 +108,70 @@ async def test_archived_event_endpoints_return_404_and_location_deletable(
 
     # Verify location is deleted
     assert db_session.query(model.Location).filter(model.Location.id == loc_id).first() is None
+
+
+@pytest.mark.asyncio
+async def test_login_caps_concurrent_hashing_to_prevent_cpu_starvation(
+    client: httpx.AsyncClient,
+    test_user: model.User,
+    test_redis
+):
+    """
+    Verifies that when active password verifications reach max_concurrent_auth_hashes,
+    incoming login requests immediately return 429 with Retry-After header
+    rather than stacking up and starving CPU.
+    """
+    from app.core.config import settings
+
+    # Simulate saturated hashing pool
+    await test_redis.set("concurrency:auth_hash", str(settings.max_concurrent_auth_hashes))
+
+    resp = await client.post(
+        "/login",
+        data={"username": test_user.email, "password": test_user.plain_password}
+    )
+    assert resp.status_code == 429
+    assert resp.headers.get("retry-after") == "2"
+    assert "Server is busy" in resp.json()["detail"]
+
+    # When concurrency slot frees up, login succeeds immediately
+    await test_redis.set("concurrency:auth_hash", "0")
+    resp_ok = await client.post(
+        "/login",
+        data={"username": test_user.email, "password": test_user.plain_password}
+    )
+    assert resp_ok.status_code == 200
+    assert "access_token" in resp_ok.json()
+
+
+@pytest.mark.asyncio
+async def test_rate_limits_dynamically_configurable_by_env_settings(
+    client: httpx.AsyncClient,
+    test_redis
+):
+    """
+    Verifies that auth and bookings rate limits are dynamic and read from settings,
+    enabling single-machine load test runs with high limits without 429 errors.
+    """
+    from app.core.config import settings
+
+    orig_auth_limit = settings.auth_rate_limit
+    try:
+        # Dynamically set auth rate limit to 2
+        settings.auth_rate_limit = 2
+
+        # 1st request
+        r1 = await client.post("/login", data={"username": "fake@test.com", "password": "wrong"})
+        assert r1.status_code in (401, 403, 404)
+
+        # 2nd request
+        r2 = await client.post("/login", data={"username": "fake@test.com", "password": "wrong"})
+        assert r2.status_code in (401, 403, 404)
+
+        # 3rd request -> hits rate limit of 2!
+        r3 = await client.post("/login", data={"username": "fake@test.com", "password": "wrong"})
+        assert r3.status_code == 429
+        assert "Too many requests" in r3.json()["detail"]
+    finally:
+        settings.auth_rate_limit = orig_auth_limit
+

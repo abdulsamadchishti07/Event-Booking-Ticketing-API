@@ -107,6 +107,9 @@ def get_client_ip(request: Request) -> str:
     return valid_ips[0]
 
 
+from typing import Callable, Union
+
+
 class IPRateLimiting:
     """
     Atomic rate-limiter using Redis:
@@ -116,9 +119,15 @@ class IPRateLimiting:
     Fails open gracefully if Redis connection encounters transient pool saturation.
     """
 
-    def __init__(self, max_requests: int, window_seconds: int):
-        self.max_requests = max_requests
+    def __init__(self, max_requests: Union[int, Callable[[], int]], window_seconds: int = 60):
+        self._max_requests = max_requests
         self.window_seconds = window_seconds
+
+    @property
+    def max_requests(self) -> int:
+        if callable(self._max_requests):
+            return int(self._max_requests())
+        return int(self._max_requests)
         
     async def __call__(
         self,
