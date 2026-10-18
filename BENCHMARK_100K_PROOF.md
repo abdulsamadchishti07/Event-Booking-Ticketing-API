@@ -9,14 +9,15 @@ This document provides empirical benchmark data, architectural analysis, and the
 ```
 ================================================================================
   STANDALONE MEASURED CAPACITY (1 Node: 2–4 Cores, 4 ASGI Workers, Postgres 16, Redis 7.2):
-  - Cached Reads (Redis hit): ~1,300 – 1,545 Requests / Second
+  - Cached Reads (Redis hit): ~1,200 – 1,545 Requests / Second (p95: 819ms at 500 CCU, 0 errors)
   - Cache Misses (Uncached DB Queries): ~250 – 300 Requests / Second
-  - Hot Booking Transactions (Pessimistic Row Locks): ~90 – 100 Requests / Second
-  - Auth Login Throughput (Argon2id CPU bound): ~7 – 25 Requests / Second
+  - Single Hot Event Booking Holds: ~62 – 100 Requests / Second (p95: 2.3s at 100 CCU; row lock serialized)
+  - Concurrency Safety: 300 users racing for 50 seats = exactly 50 wins, 250 conflicts (409), 0 server errors (500)
+  - Auth Login Throughput (Argon2id CPU bound): ~4 – 7 Logins / Second on 2 cores (capped at 10 concurrent)
   - Standalone Browsing CCU: 5,000 – 10,000 Concurrent Active Users (browsing only, 6.5s think time)
   - Standalone Hot-Booking CCU: ~500 – 600 Concurrent Active Buyers racing on a single hot event
-  - Total Discovery Requests Tested: 85,076 requests in 55.1 seconds (100% success)
-  - Origin Cache Hit Ratio: 99.998% (56,506 hits vs 1 miss on cached endpoints)
+  - Test Concurrency Profile: 85,076 requests tested across synthetic distributed IPs / raised test rate limits
+  - Origin Cache Hit Ratio: 99.998% on discovery and seat map endpoints
 
   DISTRIBUTED TARGET CAPACITY (Horizontally Scaled + Edge CDN + DB Read Replicas):
   - Theoretical System Capacity: 15,453 Requests / Second (with 90% CDN edge offload)
@@ -182,8 +183,8 @@ The payment system integrates **Stripe PaymentIntents**, automated webhooks, cry
 ┌──────────────────────────────────────────────┐ ┌────────────────────────────────────────┐
 │ LAYER 4: REDIS 7.2 IN-MEMORY STORE           │ │ LAYER 5: POSTGRESQL 16 DATABASE        │
 │ - Sub-5ms Read-Through Caching               │ │ - ACID Transaction Isolation           │
-│ - Connection Pool: max_connections = 200     │ │ - Connection Pool (pool_size=10,       │
-│ - Atomic IP Rate Limiter (120 req/min/IP)    │ │   max_overflow=5, pre_ping=True)        │
+│ - Connection Pool: max_connections = 200     │ │ - Connection Pool (pool_size=25,       │
+│ - Atomic IP Rate Limiter (120 req/min/IP)    │ │   max_overflow=25, pool_timeout=5s)   │
 │ - 10-Minute Seat Reservation Locking         │ │ - Indexed Foreign Keys and B-Trees     │
 └──────────────────────────────────────────────┘ └────────────────────────────────────────┘
 ```
@@ -245,11 +246,18 @@ docker run --rm -i --network=host \
 
 ## 9. How Anyone Can Reproduce These Results
  
-### ⚠️ Note on Nginx Anti-Spoofing & Local Rate Limiting
-Production Nginx is hardened against IP spoofing: it enforces `proxy_set_header X-Forwarded-For $remote_addr;`, overwriting client-sent `X-Forwarded-For` headers. When running k6 from a single client machine against Nginx on port 80, all virtual users share the runner's IP and will trip the atomic rate limiter (`120 req/min/IP`).
-To run local load benchmarks without hitting the single-IP rate limit:
-- **Option A (Recommended for stress testing)**: Set `SERVICES_RATE_LIMIT=100000` in `.env` before booting the stack (`docker compose up -d`).
-- **Option B**: Point k6 directly to the internal application container if testing origin throughput directly.
+### ⚠️ Note on Nginx Anti-Spoofing & Single-Machine Load Testing
+Production Nginx is hardened against IP spoofing: it enforces `proxy_set_header X-Forwarded-For $remote_addr;`, overwriting client-sent `X-Forwarded-For` headers. When running k6 from a single client machine against Nginx on port 80, all virtual users share the runner's IP and will trip the atomic per-IP rate limiters (60/min bookings, 100/min login, 120/min discovery).
+
+To run high-concurrency local load benchmarks from a single machine without getting throttled:
+- **Configure Rate Limits in `.env`**: Set the following environment variables:
+  ```env
+  SERVICES_RATE_LIMIT=100000
+  BOOKINGS_RATE_LIMIT=100000
+  PAYMENTS_RATE_LIMIT=100000
+  AUTH_RATE_LIMIT=100000
+  ```
+- **Distributed Runners**: Alternatively, run k6 across multiple virtual machines or test instances so traffic originates from distinct client IPs.
 
 ### Steps to Reproduce:
 1. **Clone the repository**:
@@ -259,15 +267,32 @@ To run local load benchmarks without hitting the single-IP rate limit:
    ```
 2. **Start Docker Compose stack** (with rate limiting raised for benchmarking):
    ```bash
-   SERVICES_RATE_LIMIT=100000 docker compose up -d --build
+   SERVICES_RATE_LIMIT=100000 BOOKINGS_RATE_LIMIT=100000 docker compose up -d --build
    ```
 3. **Seed test database**:
    ```bash
-   docker compose exec -T web python - < tests/load_testing/seed_data.py
+   docker compose exec -T web python seed_loadtest.py
    ```
-4. **Execute 1,000 VU k6 benchmark**:
+4. **Execute k6 load test**:
    ```bash
-   docker run --rm -i --network=host \
-     -v "$PWD/tests/load_testing:/scripts" \
-     grafana/k6 run /scripts/k6_100k_simulation.js
+   k6 run loadtest.js
    ```
+
+---
+
+## 10. System Design Interview Defense & Architectural Honesty
+
+When discussing this platform in a technical systems design interview, hiring managers look for architectural maturity, honesty about constraints, and deep concurrency knowledge:
+
+### Q: "Does this single server really serve 100,000 requests per second?"
+> **Strong Answer**:
+> *"No, and that distinction is critical. 100,000 CCU is an ecosystem concurrency capacity derived via Little's Law ($N = \lambda \times W$), assuming typical user browsing think time of ~6.5 seconds. On our single 2-to-4 core node, the origin sustains ~1,200 to 1,545 cached requests per second with zero errors (p95 819ms at 500 concurrent users). 
+> For booking transactions on a single hot event, throughput is bounded by PostgreSQL row-level locks (`SELECT FOR UPDATE`), handling ~62 holds/second at 100 concurrent users. 
+> To serve 100,000 active users during a flash sale, we employ a 6-layer distributed architecture: Cloudflare Edge CDN offloading ~90% of read traffic, PgBouncer pooling database connections, and a decoupled Redis booking queue or atomic Redis inventory counter to eliminate row-level database lock serialization before persisting to PostgreSQL."*
+
+### Q: "How did you prevent server starvation during login bursts or ticket races?"
+> **Strong Answer**:
+> *"We identified two critical starvation vectors and fixed them:
+> 1. **Argon2id CPU Starvation**: Argon2 is computationally intensive (~50ms CPU per hash). Under concurrent login floods, CPU saturated. We instituted a Redis atomic semaphore (`concurrency:auth_hash`) capping concurrent verifications at 10 server-wide, immediately returning HTTP 429 with `Retry-After: 2` to protect worker threads.
+> 2. **Database Connection Pool Exhaustion**: High-concurrency races exhausted SQLAlchemy's default pool of 10+5 connections, causing 30-second timeouts and HTTP 500s. We scaled the connection pool to 25 base + 25 overflow with a 5-second fast-fail timeout (`pool_timeout=5.0s`), and optimized transactions to release connections immediately after token issuance. When 300 concurrent users raced for 50 tickets, the system cleanly yielded 50 wins, 250 HTTP 409 conflicts, and zero server crashes or double-bookings."*
+
