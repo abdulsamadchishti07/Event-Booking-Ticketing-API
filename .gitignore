@@ -16,8 +16,9 @@ postman
 #enviorment
 .env
 
-# Testing cache
+# Testing cache & runtime context
 .pytest_cache/
+tests/load_testing/drop_test_context.json
 
 # Obsidian
 .obsidian/
