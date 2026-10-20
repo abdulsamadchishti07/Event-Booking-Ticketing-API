@@ -116,20 +116,12 @@ async def main_async(target_url: str, spoof_ip: bool):
     # Tally results
     status_counts = {}
     latencies = []
-    won_buyers = []
-    conflicted_buyers = []
     error_buyers = []
-
     for r in results:
         code = r["status_code"]
         status_counts[code] = status_counts.get(code, 0) + 1
         latencies.append(r["latency_ms"])
-
-        if code == 201:
-            won_buyers.append(r["buyer_index"])
-        elif code == 409:
-            conflicted_buyers.append(r["buyer_index"])
-        else:
+        if code not in (201, 409):
             error_buyers.append(r)
 
     latencies.sort()
@@ -138,12 +130,26 @@ async def main_async(target_url: str, spoof_ip: bool):
     p99_lat = latencies[int(len(latencies) * 0.99)]
     max_lat = max(latencies)
 
-    # Database state verification
-    with SessionLocal() as db:
-        actual_db_bookings = db.query(model.Booking).filter(
-            model.Booking.service_id == service_id,
-            model.Booking.status == model.BookingStatus.PENDING
-        ).count()
+    # Database state verification (checks postgres container directly, falls back to SessionLocal)
+    actual_db_bookings = None
+    try:
+        import subprocess
+        res = subprocess.run(
+            ["docker", "exec", "event_booking_postgres", "psql", "-U", "postgres", "-d", "event_booking_db", "-t", "-c",
+             f"SELECT count(*) FROM bookings WHERE service_id = {service_id} AND status = 'PENDING';"],
+            capture_output=True, text=True, timeout=5
+        )
+        if res.returncode == 0 and res.stdout.strip().isdigit():
+            actual_db_bookings = int(res.stdout.strip())
+    except Exception:
+        pass
+
+    if actual_db_bookings is None:
+        with SessionLocal() as db:
+            actual_db_bookings = db.query(model.Booking).filter(
+                model.Booking.service_id == service_id,
+                model.Booking.status == model.BookingStatus.PENDING
+            ).count()
 
     print("\n" + "=" * 80)
     print("  CONCURRENCY DROP RESULTS SUMMARY")

@@ -11,8 +11,11 @@ import json
 import os
 import sys
 
+from sqlalchemy import or_
+
 # Ensure repository root is in Python module path
-BASE_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__)) if "__file__" in globals() else os.getcwd()
+BASE_DIR = os.path.dirname(os.path.dirname(SCRIPT_DIR)) if "__file__" in globals() else os.getcwd()
 sys.path.insert(0, BASE_DIR)
 
 from app.core import oauth2, utils
@@ -23,22 +26,32 @@ def seed_drop_test(capacity: int = 20, num_users: int = 100):
     print(f"\n🌱 Initializing Concurrency Test Data: {num_users} buyers racing for {capacity} tickets...")
     
     with SessionLocal() as db:
-        # 1. Clean up previous test drop data
+        # 1. Clean up previous test drop data and test buyers
         old_services = db.query(model.Services).filter(
             model.Services.service_name.like("[CONCURRENCY_TEST]%")
         ).all()
         for s in old_services:
-            # Delete bookings for old test service
             db.query(model.Booking).filter(model.Booking.service_id == s.id).delete()
             db.delete(s)
         db.commit()
 
+        # Delete old test buyers to ensure clean slate
+        db.query(model.User).filter(
+            or_(
+                model.User.email.like("drop_buyer_%"),
+                model.User.phone_no.like("+17000000%")
+            )
+        ).delete(synchronize_session=False)
+        db.commit()
+
         # 2. Find or create a seller
-        seller_user = db.query(model.User).filter(model.User.email == "drop_seller@loadtest.local").first()
+        seller_user = db.query(model.User).filter(
+            or_(model.User.email == "drop_seller@example.com", model.User.phone_no == "+18005550199")
+        ).first()
         if not seller_user:
             seller_user = model.User(
                 name="Drop Test Seller",
-                email="drop_seller@loadtest.local",
+                email="drop_seller@example.com",
                 password_hash=utils.hash("TestPass123!"),
                 dob=date(1990, 1, 1),
                 role=model.UserRole.SELLER,
@@ -49,6 +62,11 @@ def seed_drop_test(capacity: int = 20, num_users: int = 100):
             db.add(seller_user)
             db.commit()
             db.refresh(seller_user)
+        else:
+            seller_user.email = "drop_seller@example.com"
+            seller_user.is_active = True
+            seller_user.is_verified = True
+            db.commit()
 
         seller_profile = db.query(model.SellerProfile).filter(model.SellerProfile.user_id == seller_user.id).first()
         if not seller_profile:
@@ -98,54 +116,41 @@ def seed_drop_test(capacity: int = 20, num_users: int = 100):
         print(f"✅ Created test event: ID {test_event.id} | Mode: SLOT_CAPACITY | Max Capacity: {test_event.max_capacity}")
 
         # 5. Create test buyer users and generate pre-signed JWT tokens
-        # Bulk query existing users to speed up re-runs
-        existing_users = {
-            u.email: u for u in db.query(model.User).filter(
-                model.User.email.like("drop_buyer_%@loadtest.local")
-            ).all()
-        }
-
-        user_records = []
-        new_users_to_add = []
         dummy_hash = utils.hash("BuyerPass123!")
+        buyers = [
+            model.User(
+                name=f"Drop Buyer {i}",
+                email=f"drop_buyer_{i}@example.com",
+                password_hash=dummy_hash,
+                dob=date(1995, 5, 20),
+                role=model.UserRole.CUSTOMER,
+                phone_no=f"+170{i:08d}"[-12:],
+                is_verified=True,
+                is_active=True
+            )
+            for i in range(1, num_users + 1)
+        ]
+        db.add_all(buyers)
+        db.commit()
+        for u in buyers:
+            db.refresh(u)
 
-        for i in range(1, num_users + 1):
-            email = f"drop_buyer_{i}@loadtest.local"
-            if email in existing_users:
-                user = existing_users[email]
-            else:
-                user = model.User(
-                    name=f"Drop Buyer {i}",
-                    email=email,
-                    password_hash=dummy_hash,
-                    dob=date(1995, 5, 20),
-                    role=model.UserRole.CUSTOMER,
-                    phone_no=f"+170{i:08d}"[-12:],
-                    is_verified=True,
-                    is_active=True
+        token_ttl = timedelta(days=7)
+        buyers_data = [
+            {
+                "buyer_index": i + 1,
+                "user_id": u.id,
+                "email": u.email,
+                "token": oauth2.create_access_token(
+                    data={"sub": str(u.id), "user_id": u.id},
+                    expires_delta=token_ttl
                 )
-                new_users_to_add.append(user)
-            user_records.append((i, email, user))
+            }
+            for i, u in enumerate(buyers)
+        ]
 
-        if new_users_to_add:
-            db.add_all(new_users_to_add)
-            db.commit()
-            for u in new_users_to_add:
-                db.refresh(u)
-
-        # Generate tokens
-        buyers_data = []
-        for i, email, user in user_records:
-            token = oauth2.create_access_token(data={"user_id": user.id})
-            buyers_data.append({
-                "buyer_index": i,
-                "user_id": user.id,
-                "email": user.email,
-                "token": token
-            })
-
-        # 6. Save context to tests/load_testing/drop_test_context.json
-        output_dir = os.path.dirname(os.path.abspath(__file__))
+        # 6. Save context to drop_test_context.json
+        output_dir = os.path.dirname(os.path.abspath(__file__)) if "__file__" in globals() else os.getcwd()
         output_path = os.path.join(output_dir, "drop_test_context.json")
         
         context = {
