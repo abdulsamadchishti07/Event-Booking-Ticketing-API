@@ -16,6 +16,7 @@ from app.core import oauth2, redis as redis_client
 from app.core.redis import get_redis
 from app.core.cache import invalidate_services_cache
 from app.core.config import settings
+from app.core.queue import enqueue_job_sync
 from app.services import email
 
 logger = logging.getLogger(__name__)
@@ -70,15 +71,18 @@ def confirm_booking_and_invoice(
     if background_tasks and booking:
         background_tasks.add_task(invalidate_services_cache, service_id=booking.service_id, redis=redis)
         if booking.user and booking.user.email:
-            background_tasks.add_task(
-                email.send_invoice_email,
-                to_email=booking.user.email,
-                user_name=booking.user.name,
-                invoice_number=invoice_number,
-                event_name=booking.service.service_name if booking.service else "Event Ticket",
-                quantity=booking.quantity,
-                total_amount=str(payment.amount),
-                booking_id=booking.id
+            enqueue_job_sync(
+                "send_invoice_email",
+                {
+                    "to_email": booking.user.email,
+                    "user_name": booking.user.name or "Customer",
+                    "invoice_number": invoice_number,
+                    "event_name": booking.service.service_name if booking.service else "Event Ticket",
+                    "quantity": booking.quantity,
+                    "total_amount": str(payment.amount),
+                    "booking_id": booking.id
+                },
+                background_tasks=background_tasks
             )
 
     return payment, invoice
@@ -629,14 +633,17 @@ def cancel_booking_and_refund(
     if booking:
         background_tasks.add_task(invalidate_services_cache, service_id=booking.service_id, redis=redis)
         if booking.user and booking.user.email:
-            background_tasks.add_task(
-                email.send_cancellation_email,
-                to_email=booking.user.email,
-                user_name=booking.user.name,
-                event_name=booking.service.service_name if booking.service else "Event Ticket",
-                refund_amount=str(refund_amount),
-                reason=reason_text,
-                booking_id=booking.id
+            enqueue_job_sync(
+                "send_cancellation_email",
+                {
+                    "to_email": booking.user.email,
+                    "user_name": booking.user.name or "Customer",
+                    "event_name": booking.service.service_name if booking.service else "Event Ticket",
+                    "refund_amount": str(refund_amount),
+                    "reason": reason_text,
+                    "booking_id": booking.id
+                },
+                background_tasks=background_tasks
             )
 
     return cancellation

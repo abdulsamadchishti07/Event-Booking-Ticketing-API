@@ -12,6 +12,7 @@ from starlette.concurrency import run_in_threadpool
 
 from app.core import oauth2, redis as redis_client
 from app.core.config import settings
+from app.core.queue import enqueue_job, enqueue_job_sync
 from app.core import security as utils
 from app.database import get_db, model, schema
 from app.services import email
@@ -99,8 +100,8 @@ def create_account(
             detail="A user with this email or phone number already exists."
         )
 
-    # Send verification email asynchronously in the background
-    background_tasks.add_task(email.send_otp_email, new_user.email, otp)
+    # Send verification email asynchronously via Redis queue (falls back to background_tasks)
+    enqueue_job_sync("send_otp_email", {"to_email": new_user.email, "otp": otp}, background_tasks)
 
     return new_user
 
@@ -236,8 +237,8 @@ async def resend_otp(
     user.otp_expires_at = datetime.now(timezone.utc) + timedelta(minutes=OTP_EXPIRY_MINUTES)
     await run_in_threadpool(db.commit)
 
-    # Send new OTP in the background
-    background_tasks.add_task(email.send_otp_email, user.email, otp)
+    # Send new OTP via Redis queue (falls back to background_tasks)
+    await enqueue_job("send_otp_email", {"to_email": user.email, "otp": otp}, background_tasks)
 
     return {"message": "A new verification code has been sent to your email."}
 
@@ -359,7 +360,7 @@ async def update_user(
             otp = f"{secrets.randbelow(900000) + 100000}"
             update_data["verification_otp"] = otp
             update_data["otp_expires_at"] = datetime.now(timezone.utc) + timedelta(minutes=OTP_EXPIRY_MINUTES)
-            background_tasks.add_task(email.send_otp_email, new_email, otp)
+            await enqueue_job("send_otp_email", {"to_email": new_email, "otp": otp}, background_tasks)
             email_changed = True
 
     # If updating phone number, ensure uniqueness
@@ -558,8 +559,8 @@ async def forgot_password(
     otp = f"{secrets.randbelow(900000) + 100000}"
     await redis_client.redis_client.set(f"reset_pwd_otp:{clean_email}", otp, ex=300)
 
-    # Send reset code email in the background
-    background_tasks.add_task(email.send_password_reset_email, clean_email, otp)
+    # Send reset code email via Redis queue (falls back to background_tasks)
+    await enqueue_job("send_password_reset_email", {"to_email": clean_email, "otp": otp}, background_tasks)
     return {"message": "If this email is registered, a password reset code has been sent."}
 
 
