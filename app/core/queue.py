@@ -12,28 +12,28 @@ logger = logging.getLogger(__name__)
 QUEUE_NAME = "queue:jobs"
 
 
+_sync_client = syncredis.Redis.from_url(settings.redis_url, decode_responses=True)
+
+
+def _fallback(task_name: str, payload: Dict[str, Any], background_tasks: Optional[Any]):
+    if background_tasks:
+        from app.workers.tasks import TASK_HANDLERS
+        handler = TASK_HANDLERS.get(task_name)
+        if handler:
+            background_tasks.add_task(handler, payload)
+
+
 def enqueue_job_sync(
     task_name: str,
     payload: Dict[str, Any],
     background_tasks: Optional[Any] = None
 ) -> bool:
-    """
-    Synchronous enqueue helper: pushes task payload to Redis list 'queue:jobs' in <1ms.
-    Safe for sync FastAPI route handlers; falls back to in-memory BackgroundTasks if Redis is unreachable.
-    """
     try:
-        client = syncredis.Redis.from_url(settings.redis_url, decode_responses=True)
-        job = json.dumps({"task": task_name, "payload": payload})
-        client.rpush(QUEUE_NAME, job)
-        client.close()
+        _sync_client.rpush(QUEUE_NAME, json.dumps({"task": task_name, "payload": payload}))
         return True
     except Exception as e:
         logger.warning(f"Redis queue unavailable for '{task_name}', falling back to background_tasks: {e}")
-        if background_tasks:
-            from app.workers.worker import TASK_HANDLERS
-            handler = TASK_HANDLERS.get(task_name)
-            if handler:
-                background_tasks.add_task(handler, payload)
+        _fallback(task_name, payload, background_tasks)
         return False
 
 
@@ -42,20 +42,11 @@ async def enqueue_job(
     payload: Dict[str, Any],
     background_tasks: Optional[Any] = None
 ) -> bool:
-    """
-    Asynchronous enqueue helper: pushes task payload to Redis list 'queue:jobs' in <1ms.
-    Safe for async FastAPI route handlers; falls back to in-memory BackgroundTasks if Redis is unreachable.
-    """
     try:
         client = await get_redis()
-        job = json.dumps({"task": task_name, "payload": payload})
-        await client.rpush(QUEUE_NAME, job)
+        await client.rpush(QUEUE_NAME, json.dumps({"task": task_name, "payload": payload}))
         return True
     except Exception as e:
         logger.warning(f"Redis queue unavailable for '{task_name}', falling back to background_tasks: {e}")
-        if background_tasks:
-            from app.workers.worker import TASK_HANDLERS
-            handler = TASK_HANDLERS.get(task_name)
-            if handler:
-                background_tasks.add_task(handler, payload)
+        _fallback(task_name, payload, background_tasks)
         return False
