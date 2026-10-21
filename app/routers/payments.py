@@ -372,9 +372,18 @@ async def stripe_webhook(
         )
     )
 
+    # Refresh payment under the acquired booking lock to observe any concurrent commits
+    await run_in_threadpool(db.refresh, payment)
+
     # 3. Handle payment_intent.succeeded
     if event_type == "payment_intent.succeeded":
-        # Idempotency guard: ignore duplicate deliveries
+        # Idempotency guard: ignore duplicate deliveries or already-confirmed bookings
+        if booking and booking.status == model.BookingStatus.CONFIRMED:
+            if payment.status != model.PaymentStatus.SUCCEEDED:
+                payment.status = model.PaymentStatus.SUCCEEDED
+                await run_in_threadpool(db.commit)
+            return {"status": "already_processed"}
+
         if payment.status == model.PaymentStatus.SUCCEEDED:
             return {"status": "already_processed"}
         if payment.status == model.PaymentStatus.CANCELED:

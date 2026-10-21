@@ -70,10 +70,12 @@ def released_expired_holds(db: Session = None):
                             if getattr(pi, "status", None) == "canceled":
                                 is_canceled = True
                             elif getattr(pi, "status", None) == "succeeded":
-                                booking.payment.status = model.PaymentStatus.SUCCEEDED
                                 logger.info(
-                                    f"PaymentIntent {booking.payment.stripe_payment_intent_id} actually succeeded. Skipping cancellation."
+                                    f"PaymentIntent {booking.payment.stripe_payment_intent_id} actually succeeded. Confirming booking."
                                 )
+                                from app.routers.payments import confirm_booking_and_invoice
+                                confirm_booking_and_invoice(db, booking, booking.payment)
+                                affected_service_ids.add(booking.service_id)
                                 continue
                             else:
                                 continue
