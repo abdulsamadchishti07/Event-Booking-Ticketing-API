@@ -77,11 +77,11 @@ async def login(
     acquired_hash_slot = False
     if redis_client.redis_client:
         try:
-            active_hashes = await redis_client.redis_client.incr("concurrency:auth_hash")
-            if active_hashes == 1:
-                await redis_client.redis_client.expire("concurrency:auth_hash", 10)
+            lua_incr = "local cur = redis.call('incr', KEYS[1]); if cur == 1 or redis.call('ttl', KEYS[1]) < 0 then redis.call('expire', KEYS[1], ARGV[1]) end; return cur"
+            active_hashes = await redis_client.redis_client.eval(lua_incr, 1, "concurrency:auth_hash", 10)
             if active_hashes > settings.max_concurrent_auth_hashes:
-                await redis_client.redis_client.decr("concurrency:auth_hash")
+                lua_decr = "local cur = redis.call('decr', KEYS[1]); if cur <= 0 then redis.call('del', KEYS[1]) end; return cur"
+                await redis_client.redis_client.eval(lua_decr, 1, "concurrency:auth_hash")
                 raise HTTPException(
                     status_code=status.HTTP_429_TOO_MANY_REQUESTS,
                     detail="Server is busy processing authentication requests. Please try again shortly.",
@@ -98,7 +98,8 @@ async def login(
     finally:
         if acquired_hash_slot and redis_client.redis_client:
             try:
-                await redis_client.redis_client.decr("concurrency:auth_hash")
+                lua_decr = "local cur = redis.call('decr', KEYS[1]); if cur <= 0 then redis.call('del', KEYS[1]) end; return cur"
+                await redis_client.redis_client.eval(lua_decr, 1, "concurrency:auth_hash")
             except Exception:
                 pass
 
@@ -253,7 +254,7 @@ async def refresh_token(
 
     # 4. User must still exist and be active
     user = await run_in_threadpool(lambda: db.query(model.User).filter(model.User.id == int(user_id)).first())
-    if not user or not user.is_verified:
+    if not user or not user.is_verified or not user.is_active:
         raise HTTPException(status_code=401, detail="User account not found or unverified")
 
     # 5. Issue a BRAND NEW Refresh Token + Session (True sliding window!)

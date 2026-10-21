@@ -77,15 +77,6 @@ def get_client_ip(request: Request) -> str:
         except ValueError:
             return client_host
 
-    # Check Cloudflare header first when forwarded through trusted proxy
-    cf_connecting = request.headers.get("CF-Connecting-IP")
-    if cf_connecting:
-        clean_cf = cf_connecting.strip()
-        try:
-            return str(ipaddress.ip_address(clean_cf))
-        except ValueError:
-            pass
-
     # Direct client is trusted proxy: walk X-Forwarded-For from right to left
     forwarded = request.headers.get("X-Forwarded-For")
     if not forwarded:

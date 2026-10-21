@@ -33,7 +33,15 @@ router = APIRouter(
     "/register",
     status_code=status.HTTP_201_CREATED,
     response_model=schema.UserOut,
-    summary="Register a new account"
+    summary="Register a new account",
+    dependencies=[
+        Depends(
+            redis_client.IPRateLimiting(
+                max_requests=lambda: settings.auth_rate_limit,
+                window_seconds=60
+            )
+        )
+    ]
 )
 def create_account(
     user: schema.UserCreate,
@@ -494,7 +502,7 @@ async def delete_user(
         user.name = "Deleted User"
         user.email = f"deleted_{user.id}_{int(datetime.now(timezone.utc).timestamp())}@deleted.local"
         user.phone_no = None
-        user.password_hash = utils.hash(secrets.token_urlsafe(32))
+        user.password_hash = await run_in_threadpool(utils.hash, secrets.token_urlsafe(32))
         user.is_verified = False
         user.is_active = False
 
