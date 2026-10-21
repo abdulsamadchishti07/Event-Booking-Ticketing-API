@@ -3,7 +3,8 @@ import hashlib
 import json
 import logging
 from datetime import datetime, timezone
-from typing import Optional
+from typing import Callable, Optional
+import uuid
 
 import redis.asyncio as aioredis
 
@@ -110,6 +111,63 @@ async def set_cached(
     except Exception as e:
         logger.warning(f"Redis set failed for key '{key}': {e}")
         return False
+
+
+async def get_or_compute_cached(
+    cache_key: str,
+    compute_func: Callable,
+    ttl: int,
+    lock_timeout_seconds: int = 5,
+    redis: Optional[aioredis.Redis] = None
+) -> tuple[str, bool]:
+    """
+    Prevents cache stampedes (dog-piling) using a distributed Redis mutex.
+    - If hit: returns (cached_json, True).
+    - If miss: exactly 1 request wins the lock, executes compute_func(), sets cache, returns (fresh_json, False).
+    - Other concurrent requests wait in 50ms intervals and re-read from cache.
+    """
+    client = _get_active_redis_client(redis)
+    cached = await get_cached(cache_key, redis=client)
+    if cached is not None:
+        return cached, True
+
+    lock_key = f"lock:{cache_key}"
+    lock_token = str(uuid.uuid4())
+    try:
+        is_leader = await client.set(lock_key, lock_token, nx=True, ex=lock_timeout_seconds)
+    except Exception:
+        is_leader = True
+
+    if is_leader:
+        try:
+            data = await compute_func()
+            await set_cached(cache_key, data, ttl=ttl, redis=client)
+            return data, False
+        finally:
+            lua_release = """
+            if redis.call("get", KEYS[1]) == ARGV[1] then
+                return redis.call("del", KEYS[1])
+            else
+                return 0
+            end
+            """
+            try:
+                await client.eval(lua_release, 1, lock_key, lock_token)
+            except Exception:
+                pass
+    else:
+        # Losers wait and re-read populated cache
+        wait_interval = 0.05
+        max_retries = int(lock_timeout_seconds / wait_interval)
+        for _ in range(max_retries):
+            await asyncio.sleep(wait_interval)
+            cached = await get_cached(cache_key, redis=client)
+            if cached is not None:
+                return cached, True
+
+        # Fallback if leader stalled
+        data = await compute_func()
+        return data, False
 
 
 async def invalidate_pattern(

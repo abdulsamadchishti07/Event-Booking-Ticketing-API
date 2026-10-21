@@ -13,6 +13,7 @@ from app.core import oauth2
 from app.core.cache import (
     get_cached,
     set_cached,
+    get_or_compute_cached,
     make_services_list_cache_key,
     make_service_detail_cache_key,
     make_service_seats_cache_key,
@@ -370,67 +371,65 @@ async def search_services(
         offset=offset
     )
 
-    cached_data = await get_cached(cache_key, redis=redis)
-    if cached_data is not None:
-        return Response(
-            content=cached_data,
-            media_type="application/json",
-            headers={"X-Cache": "HIT"}
-        )
+    async def _fetch_and_serialize_services() -> str:
+        query = db.query(model.Services).options(
+            joinedload(model.Services.location),
+            joinedload(model.Services.seller),
+            selectinload(model.Services.tiers)
+        ).join(model.Location).filter(model.Services.is_active == True)
 
-    query = db.query(model.Services).options(
-        joinedload(model.Services.location),
-        joinedload(model.Services.seller),
-        selectinload(model.Services.tiers)
-    ).join(model.Location).filter(model.Services.is_active == True)
+        if city:
+            query = query.filter(model.Location.city.ilike(f"%{city}%"))
+        if country:
+            query = query.filter(model.Location.country.ilike(f"%{country}%"))
+        if booking_mode:
+            query = query.filter(model.Services.booking_mode == booking_mode)
+        if min_price is not None:
+            query = query.filter(model.Services.base_price >= min_price)
+        if max_price is not None:
+            query = query.filter(model.Services.base_price <= max_price)
 
-    if city:
-        query = query.filter(model.Location.city.ilike(f"%{city}%"))
-    if country:
-        query = query.filter(model.Location.country.ilike(f"%{country}%"))
-    if booking_mode:
-        query = query.filter(model.Services.booking_mode == booking_mode)
-    if min_price is not None:
-        query = query.filter(model.Services.base_price >= min_price)
-    if max_price is not None:
-        query = query.filter(model.Services.base_price <= max_price)
+        # Date Filtering: Default to upcoming events only (start_time >= now()) unless include_past=True
+        now = datetime.now(timezone.utc)
+        if date_from:
+            query = query.filter(model.Services.start_time >= date_from)
+        elif not include_past:
+            query = query.filter(model.Services.start_time >= now)
 
-    # Date Filtering: Default to upcoming events only (start_time >= now()) unless include_past=True
-    now = datetime.now(timezone.utc)
-    if date_from:
-        query = query.filter(model.Services.start_time >= date_from)
-    elif not include_past:
-        query = query.filter(model.Services.start_time >= now)
+        if date_to:
+            query = query.filter(model.Services.start_time <= date_to)
 
-    if date_to:
-        query = query.filter(model.Services.start_time <= date_to)
+        # Sorting
+        if sort_by == "date_asc":
+            query = query.order_by(asc(model.Services.start_time), asc(model.Services.id))
+        elif sort_by == "date_desc":
+            query = query.order_by(desc(model.Services.start_time), desc(model.Services.id))
+        elif sort_by == "price_asc":
+            query = query.order_by(asc(model.Services.base_price), asc(model.Services.id))
+        elif sort_by == "price_desc":
+            query = query.order_by(desc(model.Services.base_price), desc(model.Services.id))
+        else:
+            query = query.order_by(asc(model.Services.start_time), asc(model.Services.id))
 
-    # Sorting
-    if sort_by == "date_asc":
-        query = query.order_by(asc(model.Services.start_time), asc(model.Services.id))
-    elif sort_by == "date_desc":
-        query = query.order_by(desc(model.Services.start_time), desc(model.Services.id))
-    elif sort_by == "price_asc":
-        query = query.order_by(asc(model.Services.base_price), asc(model.Services.id))
-    elif sort_by == "price_desc":
-        query = query.order_by(desc(model.Services.base_price), desc(model.Services.id))
-    else:
-        query = query.order_by(asc(model.Services.start_time), asc(model.Services.id))
+        services = await run_in_threadpool(lambda: query.offset(offset).limit(limit).all())
 
-    services = await run_in_threadpool(lambda: query.offset(offset).limit(limit).all())
+        serialized = [
+            schema.ServiceOut.model_validate(s).model_dump(mode="json")
+            for s in services
+        ]
+        return json.dumps(serialized)
 
-    serialized = [
-        schema.ServiceOut.model_validate(s).model_dump(mode="json")
-        for s in services
-    ]
-    json_data = json.dumps(serialized)
-
-    await set_cached(cache_key, json_data, ttl=settings.cache_services_ttl, redis=redis)
+    content, is_hit = await get_or_compute_cached(
+        cache_key=cache_key,
+        compute_func=_fetch_and_serialize_services,
+        ttl=settings.cache_services_ttl,
+        redis=redis
+    )
 
     return Response(
-        content=json_data,
+        content=content,
         media_type="application/json",
-        headers={"X-Cache": "MISS"}
+        headers={"X-Cache": "HIT" if is_hit else "MISS"}
     )
 
 
@@ -516,41 +515,40 @@ async def get_service_by_id(
     redis: aioredis.Redis = Depends(get_redis)
 ):
     cache_key = make_service_detail_cache_key(service_id)
-    cached_data = await get_cached(cache_key, redis=redis)
-    if cached_data is not None:
-        return Response(
-            content=cached_data,
-            media_type="application/json",
-            headers={"X-Cache": "HIT"}
-        )
 
-    service = await run_in_threadpool(
-        lambda: (
-            db.query(model.Services)
-            .options(
-                joinedload(model.Services.location),
-                joinedload(model.Services.seller),
-                selectinload(model.Services.tiers)
+    async def _fetch_detail() -> str:
+        service = await run_in_threadpool(
+            lambda: (
+                db.query(model.Services)
+                .options(
+                    joinedload(model.Services.location),
+                    joinedload(model.Services.seller),
+                    selectinload(model.Services.tiers)
+                )
+                .filter(model.Services.id == service_id)
+                .first()
             )
-            .filter(model.Services.id == service_id)
-            .first()
         )
+        if not service or not service.is_active:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Service with id {service_id} not found"
+            )
+
+        serialized = schema.ServiceOut.model_validate(service).model_dump(mode="json")
+        return json.dumps(serialized)
+
+    content, is_hit = await get_or_compute_cached(
+        cache_key=cache_key,
+        compute_func=_fetch_detail,
+        ttl=settings.cache_services_ttl,
+        redis=redis
     )
-    if not service or not service.is_active:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Service with id {service_id} not found"
-        )
-
-    serialized = schema.ServiceOut.model_validate(service).model_dump(mode="json")
-    json_data = json.dumps(serialized)
-
-    await set_cached(cache_key, json_data, ttl=settings.cache_services_ttl, redis=redis)
 
     return Response(
-        content=json_data,
+        content=content,
         media_type="application/json",
-        headers={"X-Cache": "MISS"}
+        headers={"X-Cache": "HIT" if is_hit else "MISS"}
     )
 
 
