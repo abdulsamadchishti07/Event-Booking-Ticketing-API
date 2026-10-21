@@ -51,8 +51,8 @@ class Settings(BaseSettings):
     rate_limit_fail_closed: bool = False  # False = fail-open (availability priority), True = fail-closed (security priority)
 
     # Database Connection Pool Settings
-    db_pool_size: int = 25
-    db_max_overflow: int = 25
+    db_pool_size: int = 5
+    db_max_overflow: int = 5
     db_pool_timeout: int = 10
 
     # Stripe Settings
@@ -60,7 +60,7 @@ class Settings(BaseSettings):
     STRIPE_PUBLISHABLE_KEY: str
     STRIPE_WEBHOOK_SECRET: str
 
-    model_config = SettingsConfigDict(env_file=".env", extra="ignore")
+    model_config = SettingsConfigDict(env_file=".env", extra="ignore", env_ignore_empty=True)
 
 
 # Global settings singleton

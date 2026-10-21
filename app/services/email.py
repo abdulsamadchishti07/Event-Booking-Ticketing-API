@@ -52,6 +52,7 @@ def send_mail(to_email: str, subject: str, html_content: str) -> None:
 
     except Exception as e:
         logger.error(f"Failed to send email to {to_email}: {e}")
+        raise
 
 
 def send_otp_email(to_email: str, otp: str) -> None:
