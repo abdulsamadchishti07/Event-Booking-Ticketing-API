@@ -21,9 +21,6 @@ async def get_redis() -> aioredis.Redis:
     return redis_client
 
 
-import ipaddress
-import logging
-
 logger = logging.getLogger(__name__)
 
 
@@ -64,9 +61,10 @@ def is_trusted_proxy(ip_or_host: str | None) -> bool:
 def get_client_ip(request: Request) -> str:
     """
     Safely extracts and validates client IP for rate-limiting.
-    - If direct connection is not from a trusted proxy, ignores X-Forwarded-For entirely.
-    - If direct connection is a trusted proxy, parses X-Forwarded-For chain from right to left,
-      validating all IP addresses with ipaddress.ip_address and returning the first untrusted client IP.
+    - If direct connection is not from a trusted proxy, ignores forwarding headers entirely.
+    - If direct connection is a trusted proxy:
+      1. Inspects CF-Connecting-IP (from Cloudflare) first.
+      2. Otherwise walks X-Forwarded-For from right to left, returning the first untrusted IP.
     """
     client_host = request.client.host if request.client else None
     if not client_host:
@@ -78,6 +76,15 @@ def get_client_ip(request: Request) -> str:
             return str(ipaddress.ip_address(client_host))
         except ValueError:
             return client_host
+
+    # Check Cloudflare header first when forwarded through trusted proxy
+    cf_connecting = request.headers.get("CF-Connecting-IP")
+    if cf_connecting:
+        clean_cf = cf_connecting.strip()
+        try:
+            return str(ipaddress.ip_address(clean_cf))
+        except ValueError:
+            pass
 
     # Direct client is trusted proxy: walk X-Forwarded-For from right to left
     forwarded = request.headers.get("X-Forwarded-For")
