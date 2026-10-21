@@ -22,7 +22,7 @@ services:
       - app_network
 
   # ============================================================================
-  # 2. Redis 7.2 In-Memory Cache & Session Store
+  # 2. Redis 7.2 In-Memory Cache, Rate Limiter & Job Queue
   # ============================================================================
   redis:
     image: redis:7.2-alpine
@@ -40,21 +40,21 @@ services:
       - app_network
 
   # ============================================================================
-  # 3. FastAPI Web Application (Multi-worker Uvicorn Pool)
+  # 3. App Server 1 (Migration Leader & Uvicorn Node)
   # ============================================================================
-  web:
+  web1:
     build:
       context: .
       dockerfile: Dockerfile
     image: event-booking-api:latest
-    container_name: event_booking_web
+    container_name: event_booking_web1
     restart: unless-stopped
     depends_on:
       postgres:
         condition: service_healthy
       redis:
         condition: service_healthy
-    environment:
+    environment: &app-env
       DATABASE_URL: postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@postgres:5432/${POSTGRES_DB:-event_booking_db}
       REDIS_URL: redis://redis:6379/0
       SECRET_KEY: ${SECRET_KEY:?SECRET_KEY environment variable is required and must be set in .env}
@@ -76,13 +76,84 @@ services:
       DB_MAX_OVERFLOW: ${DB_MAX_OVERFLOW:-25}
       DB_POOL_TIMEOUT: ${DB_POOL_TIMEOUT:-10}
       RATE_LIMIT_FAIL_CLOSED: ${RATE_LIMIT_FAIL_CLOSED:-false}
+      EMAIL_SMTP_SERVER: ${EMAIL_SMTP_SERVER:-}
+      EMAIL_SMTP_PORT: ${EMAIL_SMTP_PORT:-587}
+      EMAIL_HOST_USER: ${EMAIL_HOST_USER:-}
+      EMAIL_HOST_PASSWORD: ${EMAIL_HOST_PASSWORD:-}
+      DEFAULT_FROM_EMAIL: ${DEFAULT_FROM_EMAIL:-noreply@booking.abdulsamadchishti.dev}
+    healthcheck: &app-healthcheck
+      test: ["CMD-SHELL", "python -c 'import urllib.request; urllib.request.urlopen(\"http://127.0.0.1:8000/\")'"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
     expose:
       - "8000"
     networks:
       - app_network
 
   # ============================================================================
-  # 4. Nginx Reverse Proxy Gateway
+  # 4. App Server 2 (Uvicorn Worker Node - Follower)
+  # ============================================================================
+  web2:
+    image: event-booking-api:latest
+    container_name: event_booking_web2
+    restart: unless-stopped
+    depends_on:
+      web1:
+        condition: service_healthy
+    environment:
+      <<: *app-env
+      RUN_MIGRATIONS: "false"
+    healthcheck: *app-healthcheck
+    expose:
+      - "8000"
+    networks:
+      - app_network
+
+  # ============================================================================
+  # 5. App Server 3 (Uvicorn Worker Node - Follower)
+  # ============================================================================
+  web3:
+    image: event-booking-api:latest
+    container_name: event_booking_web3
+    restart: unless-stopped
+    depends_on:
+      web1:
+        condition: service_healthy
+    environment:
+      <<: *app-env
+      RUN_MIGRATIONS: "false"
+    healthcheck: *app-healthcheck
+    expose:
+      - "8000"
+    networks:
+      - app_network
+
+  # ============================================================================
+  # 6. Asynchronous Background Job Worker (Emails, Invoices, QR codes)
+  # ============================================================================
+  worker:
+    image: event-booking-api:latest
+    container_name: event_booking_worker
+    restart: unless-stopped
+    command: python -m app.workers.worker
+    depends_on:
+      web1:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+    environment:
+      <<: *app-env
+      RUN_MIGRATIONS: "false"
+    healthcheck:
+      disable: true
+    networks:
+      - app_network
+
+  # ============================================================================
+  # 7. Nginx Least-Connected Load Balancer with Failover Gateway
   # ============================================================================
   nginx:
     image: nginx:alpine
@@ -93,7 +164,11 @@ services:
     volumes:
       - ./nginx/nginx.conf:/etc/nginx/conf.d/default.conf:ro
     depends_on:
-      web:
+      web1:
+        condition: service_healthy
+      web2:
+        condition: service_healthy
+      web3:
         condition: service_healthy
     networks:
       - app_network
