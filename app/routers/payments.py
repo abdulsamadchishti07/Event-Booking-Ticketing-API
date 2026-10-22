@@ -68,8 +68,9 @@ def confirm_booking_and_invoice(
     db.commit()
     db.refresh(payment)
 
-    if background_tasks and booking:
-        background_tasks.add_task(invalidate_services_cache, service_id=booking.service_id, redis=redis)
+    if booking:
+        if background_tasks:
+            background_tasks.add_task(invalidate_services_cache, service_id=booking.service_id, redis=redis)
         if booking.user and booking.user.email:
             enqueue_job_sync(
                 "send_invoice_email",
