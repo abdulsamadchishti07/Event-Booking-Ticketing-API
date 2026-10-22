@@ -61,16 +61,16 @@ def create_account(
 
     # Check if a user with this email is already registered (case-insensitive)
     existing_user = db.query(model.User).filter(func.lower(model.User.email) == clean_email).first()
-    if existing_user:
+    if existing_user and existing_user.is_verified:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail=f"User with email '{clean_email}' already exists."
         )
 
-    # Check if phone number is already registered
+    # Check if phone number is already registered to another user
     if user.phone_no:
         existing_phone = db.query(model.User).filter(model.User.phone_no == user.phone_no).first()
-        if existing_phone:
+        if existing_phone and (not existing_user or existing_phone.id != existing_user.id):
             raise HTTPException(
                 status_code=status.HTTP_409_CONFLICT,
                 detail="User with this phone number already exists."
@@ -83,24 +83,34 @@ def create_account(
     otp = f"{secrets.randbelow(900000) + 100000}"
     expires_at = datetime.now(timezone.utc) + timedelta(minutes=OTP_EXPIRY_MINUTES)
 
-    # Create new User model instance - ALWAYS default to CUSTOMER
-    new_user = model.User(
-        name=user.name,
-        email=clean_email,
-        dob=user.dob,
-        phone_no=user.phone_no,
-        role=model.UserRole.CUSTOMER,
-        password_hash=hashed_password,
-        is_verified=False,
-        verification_otp=otp,
-        otp_expires_at=expires_at
-    )
+    if existing_user:
+        # Prevent pre-registration takeover: overwrite unverified account
+        existing_user.name = user.name
+        existing_user.dob = user.dob
+        existing_user.phone_no = user.phone_no
+        existing_user.password_hash = hashed_password
+        existing_user.verification_otp = otp
+        existing_user.otp_expires_at = expires_at
+        user_record = existing_user
+    else:
+        # Create new User model instance - ALWAYS default to CUSTOMER
+        user_record = model.User(
+            name=user.name,
+            email=clean_email,
+            dob=user.dob,
+            phone_no=user.phone_no,
+            role=model.UserRole.CUSTOMER,
+            password_hash=hashed_password,
+            is_verified=False,
+            verification_otp=otp,
+            otp_expires_at=expires_at
+        )
+        db.add(user_record)
 
     # Persist user in the database
     try:
-        db.add(new_user)
         db.commit()
-        db.refresh(new_user)
+        db.refresh(user_record)
     except IntegrityError:
         db.rollback()
         raise HTTPException(
@@ -109,9 +119,9 @@ def create_account(
         )
 
     # Send verification email asynchronously via Redis queue (falls back to background_tasks)
-    enqueue_job_sync("send_otp_email", {"to_email": new_user.email, "otp": otp}, background_tasks)
+    enqueue_job_sync("send_otp_email", {"to_email": user_record.email, "otp": otp}, background_tasks)
 
-    return new_user
+    return user_record
 
 
 # ==========================================================
@@ -120,7 +130,15 @@ def create_account(
 @router.post(
     "/verify-otp",
     response_model=schema.MessageResponse,
-    summary="Verify account email with OTP"
+    summary="Verify account email with OTP",
+    dependencies=[
+        Depends(
+            redis_client.IPRateLimiting(
+                max_requests=lambda: settings.auth_rate_limit,
+                window_seconds=60
+            )
+        )
+    ]
 )
 async def verify_otp(
     payload: schema.VerifyOTP,
@@ -206,7 +224,15 @@ async def verify_otp(
 @router.post(
     "/resend-otp",
     response_model=schema.MessageResponse,
-    summary="Resend verification OTP"
+    summary="Resend verification OTP",
+    dependencies=[
+        Depends(
+            redis_client.IPRateLimiting(
+                max_requests=lambda: settings.auth_rate_limit,
+                window_seconds=60
+            )
+        )
+    ]
 )
 async def resend_otp(
     payload: schema.ResendOTP,
@@ -538,7 +564,15 @@ async def delete_user(
 @router.post(
     "/forgot-password",
     response_model=schema.MessageResponse,
-    summary="Request password reset OTP"
+    summary="Request password reset OTP",
+    dependencies=[
+        Depends(
+            redis_client.IPRateLimiting(
+                max_requests=lambda: settings.auth_rate_limit,
+                window_seconds=60
+            )
+        )
+    ]
 )
 async def forgot_password(
     payload: schema.ForgotPasswordRequest,
@@ -578,7 +612,15 @@ async def forgot_password(
 @router.post(
     "/reset-password",
     response_model=schema.MessageResponse,
-    summary="Reset password with OTP"
+    summary="Reset password with OTP",
+    dependencies=[
+        Depends(
+            redis_client.IPRateLimiting(
+                max_requests=lambda: settings.auth_rate_limit,
+                window_seconds=60
+            )
+        )
+    ]
 )
 async def reset_password(
     payload: schema.ResetPasswordRequest,
