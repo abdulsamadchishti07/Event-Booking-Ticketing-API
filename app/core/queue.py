@@ -12,7 +12,7 @@ logger = logging.getLogger(__name__)
 QUEUE_NAME = "queue:jobs"
 
 
-_sync_client = syncredis.Redis.from_url(settings.redis_url, decode_responses=True)
+_sync_client = syncredis.Redis.from_url(settings.redis_url, decode_responses=True, socket_timeout=5)
 
 
 def _fallback(task_name: str, payload: Dict[str, Any], background_tasks: Optional[Any]):

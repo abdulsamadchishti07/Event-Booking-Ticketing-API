@@ -55,10 +55,10 @@ class Settings(BaseSettings):
     db_max_overflow: int = 5
     db_pool_timeout: int = 10
 
-    # Stripe Settings
-    STRIPE_SECRET_KEY: str
-    STRIPE_PUBLISHABLE_KEY: str
-    STRIPE_WEBHOOK_SECRET: str
+    # Stripe Settings (Defaults to empty string to prevent fatal startup crash in dev/test)
+    STRIPE_SECRET_KEY: str = ""
+    STRIPE_PUBLISHABLE_KEY: str = ""
+    STRIPE_WEBHOOK_SECRET: str = ""
 
     model_config = SettingsConfigDict(env_file=".env", extra="ignore", env_ignore_empty=True)
 

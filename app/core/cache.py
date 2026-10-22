@@ -164,7 +164,10 @@ async def get_or_compute_cached(
             cached = await get_cached(cache_key, redis=client)
             if cached is not None:
                 return cached, True
-            if not await client.exists(lock_key):
+            try:
+                if not await client.exists(lock_key):
+                    break
+            except Exception:
                 break
 
         # Fallback if leader stalled
