@@ -77,7 +77,14 @@ def get_client_ip(request: Request) -> str:
         except ValueError:
             return client_host
 
-    # Direct client is trusted proxy: walk X-Forwarded-For from right to left
+    # Direct client is trusted proxy: check CF-Connecting-IP first, else walk X-Forwarded-For
+    cf_ip = request.headers.get("CF-Connecting-IP")
+    if cf_ip:
+        try:
+            return str(ipaddress.ip_address(cf_ip.strip()))
+        except ValueError:
+            pass
+
     forwarded = request.headers.get("X-Forwarded-For")
     if not forwarded:
         return client_host

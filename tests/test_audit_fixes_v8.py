@@ -3,6 +3,7 @@ from datetime import datetime, timedelta, timezone
 from unittest.mock import patch, MagicMock
 import httpx
 import pytest
+import stripe
 from sqlalchemy.orm import Session
 
 from app.database import model
@@ -15,49 +16,40 @@ from app.workers.worker import process_single_job
 @pytest.mark.asyncio
 async def test_preregistration_takeover_prevention(client: httpx.AsyncClient, db_session: Session):
     """
-    Verifies that registering an existing UNVERIFIED account allows the legitimate owner
-    to overwrite the unverified state and re-request an OTP, rather than locking them out with 409.
-    Also verifies that VERIFIED accounts still return 409.
+    Verifies that attempting to register an existing user (unverified or verified)
+    returns 409 Conflict and NEVER overwrites the existing user's password or profile.
     """
     clean_email = "takeover_test@example.com"
-    # 1. First registration by 'attacker' (unverified)
+    # 1. First registration by user (unverified)
+    payload_user = {
+        "name": "Original User",
+        "email": clean_email,
+        "password": "OriginalPassword123!",
+        "dob": "1990-01-01",
+        "phone_no": "+19998887771"
+    }
+    r1 = await client.post("/account/register", json=payload_user)
+    assert r1.status_code == 201
+    created_id = r1.json()["id"]
+
+    # 2. Attacker attempts to register with same email to hijack account
     payload_attacker = {
         "name": "Attacker",
         "email": clean_email,
         "password": "AttackerPassword123!",
-        "dob": "1990-01-01",
-        "phone_no": "+19998887771"
-    }
-    r1 = await client.post("/account/register", json=payload_attacker)
-    assert r1.status_code == 201
-    created_id = r1.json()["id"]
-
-    # 2. Legitimate user comes and registers with same email
-    payload_victim = {
-        "name": "Legitimate User",
-        "email": clean_email,
-        "password": "LegitimatePassword123!",
         "dob": "1992-02-02",
         "phone_no": "+19998887772"
     }
-    r2 = await client.post("/account/register", json=payload_victim)
-    assert r2.status_code == 201
-    assert r2.json()["id"] == created_id
-    assert r2.json()["name"] == "Legitimate User"
+    r2 = await client.post("/account/register", json=payload_attacker)
+    assert r2.status_code == 409
+    assert "already exists" in r2.json()["detail"]
 
-    # Verify database state was updated
+    # Verify database state was NOT overwritten
     user = db_session.query(model.User).filter(model.User.id == created_id).first()
-    assert user.name == "Legitimate User"
+    assert user.name == "Original User"
     assert not user.is_verified
-    assert utils.verify_password("LegitimatePassword123!", user.password_hash)
-
-    # 3. Verify user and ensure subsequent attempt returns 409
-    user.is_verified = True
-    db_session.commit()
-
-    r3 = await client.post("/account/register", json=payload_victim)
-    assert r3.status_code == 409
-    assert "already exists" in r3.json()["detail"]
+    assert utils.verify_password("OriginalPassword123!", user.password_hash)
+    assert not utils.verify_password("AttackerPassword123!", user.password_hash)
 
 
 @pytest.mark.asyncio
@@ -200,7 +192,8 @@ def test_sweeper_oversell_protection(db_session: Session, test_user: model.User,
     mock_intent = MagicMock()
     mock_intent.status = "succeeded"
 
-    with patch("stripe.PaymentIntent.retrieve", return_value=mock_intent), \
+    with patch("stripe.PaymentIntent.cancel", side_effect=stripe.error.InvalidRequestError("Already succeeded", "id")), \
+         patch("stripe.PaymentIntent.retrieve", return_value=mock_intent), \
          patch("stripe.Refund.create") as mock_refund:
         # Run sweeper
         released_expired_holds(db=db_session)
@@ -211,7 +204,7 @@ def test_sweeper_oversell_protection(db_session: Session, test_user: model.User,
             payment_intent="pi_sweeper_oversell_test",
             amount=10000,
             reason="requested_by_customer",
-            idempotency_key="sweeper_refund_pi_sweeper_oversell_test"
+            idempotency_key="auto_refund_pi_sweeper_oversell_test"
         )
 
         db_session.refresh(booking_expired)
@@ -219,6 +212,96 @@ def test_sweeper_oversell_protection(db_session: Session, test_user: model.User,
         # Booking must be CANCELLED, payment must be CANCELED (not CONFIRMED/SUCCEEDED)
         assert booking_expired.status == model.BookingStatus.CANCELLED
         assert payment_expired.status == model.PaymentStatus.CANCELED
+
+        # Cancellation audit row must be created
+        canc = db_session.query(model.Cancellation).filter(model.Cancellation.booking_id == booking_expired.id).first()
+        assert canc is not None
+        assert canc.refund_amount == 100.0
+
+
+def test_sweeper_refund_failure_leaves_booking_pending(db_session: Session, test_user: model.User, seller_user: model.User):
+    """
+    Verifies that if stripe.Refund.create raises an exception, the sweeper does NOT
+    cancel the booking or payment, leaving them pending so the refund can be retried next cycle.
+    """
+    location = model.Location(seller_id=seller_user.seller_profile.id, city="Fail City", country="Fail Country", address_line="123 Fail St")
+    db_session.add(location)
+    db_session.commit()
+
+    service = model.Services(
+        seller_id=seller_user.seller_profile.id,
+        service_name="Refund Fail Event",
+        location_id=location.id,
+        start_time=datetime.now(timezone.utc) + timedelta(days=1),
+        end_time=datetime.now(timezone.utc) + timedelta(days=1, hours=2),
+        base_price=50.0,
+        is_active=True,
+        booking_mode=model.BookingMode.SLOT_CAPACITY,
+        max_capacity=1
+    )
+    db_session.add(service)
+    db_session.commit()
+
+    expired_time = datetime.now(timezone.utc) - timedelta(minutes=15)
+    booking = model.Booking(
+        user_id=test_user.id,
+        service_id=service.id,
+        start_time=service.start_time,
+        end_time=service.end_time,
+        status=model.BookingStatus.PENDING,
+        total_amount=50.0,
+        created_at=expired_time
+    )
+    db_session.add(booking)
+    db_session.commit()
+
+    payment = model.Payment(
+        booking_id=booking.id,
+        amount=50.0,
+        status=model.PaymentStatus.REQUIRES_PAYMENT_METHOD,
+        stripe_payment_intent_id="pi_sweeper_fail_test",
+        client_secret="sec_fail_test",
+        idempotency_key="idem_fail_test"
+    )
+    db_session.add(payment)
+    db_session.commit()
+
+    # Fill capacity with another confirmed booking
+    other_user = model.User(
+        name="Other User",
+        email="other_fail@test.com",
+        password_hash=utils.hash("Pass123!"),
+        dob=datetime.now(timezone.utc).date(),
+        role=model.UserRole.CUSTOMER,
+        is_verified=True
+    )
+    db_session.add(other_user)
+    db_session.commit()
+
+    booking_confirmed = model.Booking(
+        user_id=other_user.id,
+        service_id=service.id,
+        start_time=service.start_time,
+        end_time=service.end_time,
+        status=model.BookingStatus.CONFIRMED,
+        total_amount=50.0
+    )
+    db_session.add(booking_confirmed)
+    db_session.commit()
+
+    mock_intent = MagicMock()
+    mock_intent.status = "succeeded"
+
+    with patch("stripe.PaymentIntent.cancel", side_effect=stripe.error.InvalidRequestError("Already succeeded", "id")), \
+         patch("stripe.PaymentIntent.retrieve", return_value=mock_intent), \
+         patch("stripe.Refund.create", side_effect=RuntimeError("Stripe network timeout")):
+        released_expired_holds(db=db_session)
+
+        db_session.refresh(booking)
+        db_session.refresh(payment)
+        # Booking and payment must remain PENDING/REQUIRES_PAYMENT_METHOD
+        assert booking.status == model.BookingStatus.PENDING
+        assert payment.status == model.PaymentStatus.REQUIRES_PAYMENT_METHOD
 
 
 def test_sweeper_db_error_isolation(db_session: Session, test_user: model.User, seller_user: model.User):

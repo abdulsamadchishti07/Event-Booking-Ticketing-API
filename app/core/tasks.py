@@ -130,10 +130,26 @@ def released_expired_holds(db: Session = None):
                                         payment_intent=booking.payment.stripe_payment_intent_id,
                                         amount=int(booking.payment.amount * 100),
                                         reason="requested_by_customer",
-                                        idempotency_key=f"sweeper_refund_{booking.payment.stripe_payment_intent_id}"
+                                        idempotency_key=f"auto_refund_{booking.payment.stripe_payment_intent_id}"
                                     )
                                 except Exception as refund_err:
                                     logger.error(f"Sweeper auto-refund failed for {booking.id}: {refund_err}")
+                                    db.rollback()
+                                    continue
+
+                                existing_cancellation = (
+                                    db.query(model.Cancellation)
+                                    .filter(model.Cancellation.booking_id == booking.id)
+                                    .first()
+                                )
+                                if not existing_cancellation:
+                                    cancellation = model.Cancellation(
+                                        booking_id=booking.id,
+                                        refund_amount=booking.payment.amount,
+                                        reason="Auto-refunded: payment arrived after hold expired or capacity filled"
+                                    )
+                                    db.add(cancellation)
+
                                 booking.payment.status = model.PaymentStatus.CANCELED
 
                         elif is_canceled:
